@@ -25,7 +25,7 @@ var (
 			Name: "health_event_analyzer_events_received_total",
 			Help: "Total number of events received from the watcher.",
 		},
-		[]string{"node_name"},
+		[]string{"entity_value"},
 	)
 	totalEventsSuccessfullyProcessed = promauto.NewCounter(
 		prometheus.CounterOpts{
@@ -44,17 +44,9 @@ var (
 	fatalEventsPublishedTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "fatal_events_published_total",
-			Help: "Total number of times a fatal event is published for an entity.",
+			Help: "Total number of new fatal events published.",
 		},
 		[]string{"entity_value"},
-	)
-
-	ruleMatchedTotal = promauto.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "rule_matched_total",
-			Help: "Total number of times a rule matched for a node",
-		},
-		[]string{"rule_name", "node_name"},
 	)
 
 	// performance metrics

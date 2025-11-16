@@ -18,15 +18,15 @@ import (
 	"fmt"
 	"log/slog"
 
-	multierror "github.com/hashicorp/go-multierror"
 	"github.com/nvidia/nvsentinel/fault-quarantine/pkg/config"
 	"github.com/nvidia/nvsentinel/fault-quarantine/pkg/informer"
+
+	multierror "github.com/hashicorp/go-multierror"
+	"k8s.io/client-go/kubernetes"
 )
 
-func InitializeRuleSetEvaluators(
-	ruleSets []config.RuleSet,
-	nodeInformer *informer.NodeInformer,
-) ([]RuleSetEvaluatorIface, error) {
+func InitializeRuleSetEvaluators(ruleSets []config.RuleSet,
+	client kubernetes.Interface, nodeInformer *informer.NodeInformer) ([]RuleSetEvaluatorIface, error) {
 	var (
 		ruleSetEvals []RuleSetEvaluatorIface
 		errs         *multierror.Error
@@ -35,7 +35,7 @@ func InitializeRuleSetEvaluators(
 	for _, ruleSet := range ruleSets {
 		// We can extend this to add different types of match based rules
 		if len(ruleSet.Match.Any) > 0 {
-			evaluators, err := createEvaluators(ruleSet.Match.Any, nodeInformer)
+			evaluators, err := createEvaluators(ruleSet.Match.Any, client, nodeInformer)
 			if err != nil {
 				errs = multierror.Append(errs, err)
 			} else {
@@ -47,7 +47,7 @@ func InitializeRuleSetEvaluators(
 		}
 
 		if len(ruleSet.Match.All) > 0 {
-			evaluators, err := createEvaluators(ruleSet.Match.All, nodeInformer)
+			evaluators, err := createEvaluators(ruleSet.Match.All, client, nodeInformer)
 			if err != nil {
 				errs = multierror.Append(errs, err)
 			} else {
@@ -62,7 +62,8 @@ func InitializeRuleSetEvaluators(
 	return ruleSetEvals, errs.ErrorOrNil()
 }
 
-func createEvaluators(rules []config.Rule, nodeInformer *informer.NodeInformer) ([]RuleEvaluator, error) {
+func createEvaluators(rules []config.Rule, client kubernetes.Interface,
+	nodeInformer *informer.NodeInformer) ([]RuleEvaluator, error) {
 	evaluators := []RuleEvaluator{}
 
 	var errs *multierror.Error

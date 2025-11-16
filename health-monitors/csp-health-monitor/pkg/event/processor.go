@@ -20,10 +20,10 @@ import (
 	"log/slog"
 	"sync"
 
+	"github.com/nvidia/nvsentinel/data-models/pkg/model"
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/config"
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/datastore"
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/metrics"
-	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/model"
 )
 
 // Processor persists normalized maintenance events to the backing datastore.

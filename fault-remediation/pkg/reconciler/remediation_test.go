@@ -19,11 +19,10 @@ import (
 	"testing"
 	"text/template"
 
-	"github.com/google/uuid"
-	"github.com/nvidia/nvsentinel/data-models/pkg/model"
-	"github.com/nvidia/nvsentinel/data-models/pkg/protos"
-	"github.com/nvidia/nvsentinel/fault-remediation/pkg/config"
+	platformconnectorprotos "github.com/nvidia/nvsentinel/data-models/pkg/protos"
+	"github.com/nvidia/nvsentinel/store-client/pkg/datastore"
 	"github.com/stretchr/testify/assert"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metameta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -57,6 +56,14 @@ func (m *MockNamespaceableResource) Namespace(namespace string) dynamic.Resource
 	return &MockResourceInterface{
 		createFunc: m.createFunc,
 	}
+}
+
+func (m *MockNamespaceableResource) Get(ctx context.Context, name string, opts metav1.GetOptions, subresources ...string) (*unstructured.Unstructured, error) {
+	// Return NotFound error to simulate resource doesn't exist yet
+	return nil, errors.NewNotFound(schema.GroupResource{
+		Group:    "janitor.dgxc.nvidia.com",
+		Resource: "rebootnodes",
+	}, name)
 }
 
 func (m *MockNamespaceableResource) Create(ctx context.Context, obj *unstructured.Unstructured, opts metav1.CreateOptions, subresources ...string) (*unstructured.Unstructured, error) {
@@ -220,15 +227,11 @@ func TestNewK8sClient(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			client, clientSet, err := NewK8sClient(tt.kubeconfig, tt.dryRun, TemplateData{
+				Namespace:         "dgxc-janitor",
+				Version:           "v1alpha1",
+				ApiGroup:          "janitor.dgxc.nvidia.com",
 				TemplateMountPath: "templates",
 				TemplateFileName:  "rebootnode-template.yaml",
-				MaintenanceResource: config.MaintenanceResource{
-					Namespace:             "dgxc-janitor",
-					Version:               "v1alpha1",
-					ApiGroup:              "janitor.dgxc.nvidia.com",
-					Kind:                  "RebootNode",
-					CompleteConditionType: "NodeReady",
-				},
 			})
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -253,7 +256,7 @@ func TestCreateRebootNodeResource(t *testing.T) {
 		name              string
 		nodeName          string
 		dryRun            bool
-		recommendedAction protos.RecommendedAction
+		recommendedAction platformconnectorprotos.RecommendedAction
 		shouldSucceed     bool
 		expectedError     bool
 		shouldCreate      bool
@@ -262,7 +265,7 @@ func TestCreateRebootNodeResource(t *testing.T) {
 			name:              "Successful rebootnode creation",
 			nodeName:          "test-node-1",
 			dryRun:            false,
-			recommendedAction: protos.RecommendedAction_RESTART_BM,
+			recommendedAction: platformconnectorprotos.RecommendedAction_RESTART_VM,
 			shouldSucceed:     true,
 			expectedError:     false,
 			shouldCreate:      true,
@@ -271,7 +274,7 @@ func TestCreateRebootNodeResource(t *testing.T) {
 			name:              "Skip rebootnode creation with dry run",
 			nodeName:          "test-node-2",
 			dryRun:            true,
-			recommendedAction: protos.RecommendedAction_RESTART_BM,
+			recommendedAction: platformconnectorprotos.RecommendedAction_RESTART_VM,
 			shouldSucceed:     true,
 			expectedError:     false,
 			shouldCreate:      false,
@@ -316,26 +319,24 @@ spec:
 			mockMapper := restmapper.NewDeferredDiscoveryRESTMapper(cachedClient)
 			client := &FaultRemediationClient{
 				clientset:  mockClient,
-				kubeClient: nil,
+				kubeClient: nil, // Not needed for this test since it only tests maintenance resource creation
 				restMapper: mockMapper,
 				dryRunMode: []string{},
 				template:   tmpl,
 				templateData: TemplateData{
-					MaintenanceResource: config.MaintenanceResource{
-						Version:  "v1alpha1",
-						ApiGroup: "janitor.dgxc.nvidia.com",
-					},
+					Version:  "v1alpha1",
+					ApiGroup: "janitor.dgxc.nvidia.com",
 				},
 			}
 			if tt.dryRun {
 				client.dryRunMode = []string{metav1.DryRunAll}
 			}
 
-			// Create a HealthEventData object
-			healthEventDoc := &HealthEventData{
-				ID: uuid.New().String(),
-				HealthEventWithStatus: model.HealthEventWithStatus{
-					HealthEvent: &protos.HealthEvent{
+			// Create a HealthEventDoc object
+			healthEventDoc := &HealthEventDoc{
+				ID: "test-health-event-id",
+				HealthEventWithStatus: datastore.HealthEventWithStatus{
+					HealthEvent: &platformconnectorprotos.HealthEvent{
 						NodeName:          tt.nodeName,
 						RecommendedAction: tt.recommendedAction,
 					},
@@ -343,11 +344,8 @@ spec:
 			}
 
 			// Test CreateMaintenanceResource
-			result, crName := client.CreateMaintenanceResource(context.Background(), healthEventDoc)
+			result := client.CreateMaintenanceResource(context.Background(), healthEventDoc)
 			assert.Equal(t, tt.shouldSucceed, result)
-			if tt.shouldSucceed && !tt.dryRun {
-				assert.NotEmpty(t, crName, "CR name should be returned on success")
-			}
 			assert.Equal(t, tt.shouldCreate, createCalled, "Create function call expectation mismatch")
 		})
 	}

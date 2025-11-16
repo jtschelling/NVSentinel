@@ -9,9 +9,19 @@ Expand the name of the chart.
 Create a default fully qualified app name.
 We truncate at 63 chars because some Kubernetes name fields are limited to this (by the DNS naming spec).
 If release name contains chart name it will be used as a full name.
+
+Backward compatibility: useLegacyResourceNames maintains compatibility with existing deployments
+that use hardcoded "platform-connectors" resource names.
+User's fullnameOverride takes precedence over all other settings.
 */}}
 {{- define "nvsentinel.fullname" -}}
+{{- if .Values.fullnameOverride }}
+{{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" }}
+{{- else if .Values.global.useLegacyResourceNames }}
 {{- "platform-connectors" | trunc 63 | trimSuffix "-" }}
+{{- else }}
+{{- .Release.Name | trunc 63 | trimSuffix "-" }}
+{{- end }}
 {{- end }}
 
 {{/*
@@ -46,4 +56,31 @@ Create the name of the service account to use
 */}}
 {{- define "nvsentinel.serviceAccountName" -}}
 {{- include "nvsentinel.fullname" . }}
+{{- end }}
+
+{{/*
+Dynamically determine MongoDB service name based on architecture.
+This mirrors the logic from the MongoDB chart's mongodb.service.nameOverride helper.
+*/}}
+{{- define "nvsentinel.mongodb.serviceName" -}}
+{{- if and .Values.global.datastore (eq .Values.global.datastore.provider "mongodb") }}
+{{- $mongodbStore := index .Values "mongodb-store" }}
+{{- if and $mongodbStore $mongodbStore.mongodb }}
+{{- $mongodb := $mongodbStore.mongodb }}
+{{- if and $mongodb.service $mongodb.service.nameOverride }}
+{{- print $mongodb.service.nameOverride }}
+{{- else }}
+{{- $fullname := printf "%s-mongodb" (include "nvsentinel.fullname" .) }}
+{{- if eq ($mongodb.architecture | default "standalone") "replicaset" }}
+{{- printf "%s-headless" $fullname }}
+{{- else }}
+{{- printf "%s" $fullname }}
+{{- end }}
+{{- end }}
+{{- else }}
+{{- printf "%s-mongodb" (include "nvsentinel.fullname" .) }}
+{{- end }}
+{{- else }}
+{{- .Values.global.datastore.connection.host }}
+{{- end }}
 {{- end }}

@@ -20,11 +20,10 @@ import (
 	"log/slog"
 	"time"
 
-	protos "github.com/nvidia/nvsentinel/data-models/pkg/protos"
+	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/proto"
 	"k8s.io/apimachinery/pkg/util/wait"
 )
 
@@ -34,7 +33,7 @@ const (
 )
 
 type PublisherConfig struct {
-	platformConnectorClient protos.PlatformConnectorClient
+	platformConnectorClient pb.PlatformConnectorClient
 }
 
 func isRetryableError(err error) bool {
@@ -51,7 +50,7 @@ func isRetryableError(err error) bool {
 	return false
 }
 
-func (p *PublisherConfig) sendHealthEventWithRetry(ctx context.Context, healthEvents *protos.HealthEvents) error {
+func (p *PublisherConfig) sendHealthEventWithRetry(ctx context.Context, healthEvents *pb.HealthEvents) error {
 	backoff := wait.Backoff{
 		Steps:    maxRetries,
 		Duration: delay,
@@ -69,43 +68,36 @@ func (p *PublisherConfig) sendHealthEventWithRetry(ctx context.Context, healthEv
 
 		if isRetryableError(err) {
 			slog.Error("Retryable error occurred", "error", err)
-			fatalEventPublishingError.WithLabelValues("retryable_error").Inc()
+			FatalEventPublishingError.WithLabelValues("retryable_error").Inc()
 
 			return false, nil
 		}
 
 		slog.Error("Non-retryable error occurred", "error", err)
-		fatalEventPublishingError.WithLabelValues("non_retryable_error").Inc()
+		FatalEventPublishingError.WithLabelValues("non_retryable_error").Inc()
 
-		return false, fmt.Errorf("non retryable error occurred while sending health event: %w", err)
+		return false, fmt.Errorf("non-retryable error publishing health event: %w", err)
 	})
 	if err != nil {
 		slog.Error("All retry attempts to send health event failed", "error", err)
-		fatalEventPublishingError.WithLabelValues("event_publishing_to_UDS_error").Inc()
-
-		return fmt.Errorf("all retry attempts to send health event failed: %w", err)
+		return fmt.Errorf("failed to publish health event after retries: %w", err)
 	}
 
 	return nil
 }
 
-func NewPublisher(platformConnectorClient protos.PlatformConnectorClient) *PublisherConfig {
+func NewPublisher(platformConnectorClient pb.PlatformConnectorClient) *PublisherConfig {
 	return &PublisherConfig{platformConnectorClient: platformConnectorClient}
 }
 
-func (p *PublisherConfig) Publish(ctx context.Context, event *protos.HealthEvent,
-	recommendedAction protos.RecommendedAction, ruleName string) error {
-	newEvent := proto.Clone(event).(*protos.HealthEvent)
-
-	newEvent.Agent = "health-events-analyzer"
-	newEvent.CheckName = ruleName
-	newEvent.RecommendedAction = recommendedAction
-	newEvent.IsHealthy = false
-	newEvent.IsFatal = true
-
-	req := &protos.HealthEvents{
-		Version: 1,
-		Events:  []*protos.HealthEvent{newEvent},
+func (p *PublisherConfig) Publish(ctx context.Context, event *pb.HealthEvent,
+	recommendedAction pb.RecommendedAction) error {
+	// Create the health events request
+	event.IsFatal = true
+	event.RecommendedAction = recommendedAction
+	req := &pb.HealthEvents{
+		Version: 1, // Set appropriate version
+		Events:  []*pb.HealthEvent{event},
 	}
 
 	return p.sendHealthEventWithRetry(ctx, req)

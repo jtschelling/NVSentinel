@@ -24,31 +24,31 @@ import (
 	"github.com/nvidia/nvsentinel/data-models/pkg/model"
 	"github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/platform-connectors/pkg/ringbuffer"
-	"github.com/nvidia/nvsentinel/store-client/pkg/client"
+	"github.com/nvidia/nvsentinel/store-client/pkg/config"
+	"github.com/nvidia/nvsentinel/store-client/pkg/datastore"
 	_ "github.com/nvidia/nvsentinel/store-client/pkg/datastore/providers"
-	"github.com/nvidia/nvsentinel/store-client/pkg/factory"
 
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 )
 
 type DatabaseStoreConnector struct {
-	// databaseClient is the database-agnostic client
-	databaseClient client.DatabaseClient
+	// dataStore is the database-agnostic datastore
+	dataStore datastore.DataStore
 	// resourceSinkClients are client for pushing data to the resource count sink
 	ringBuffer *ringbuffer.RingBuffer
 	nodeName   string
 }
 
 func new(
-	databaseClient client.DatabaseClient,
+	dataStore datastore.DataStore,
 	ringBuffer *ringbuffer.RingBuffer,
 	nodeName string,
 ) *DatabaseStoreConnector {
 	return &DatabaseStoreConnector{
-		databaseClient: databaseClient,
-		ringBuffer:     ringBuffer,
-		nodeName:       nodeName,
+		dataStore:  dataStore,
+		ringBuffer: ringBuffer,
+		nodeName:   nodeName,
 	}
 }
 
@@ -59,29 +59,31 @@ func InitializeDatabaseStoreConnector(ctx context.Context, ringbuffer *ringbuffe
 		return nil, fmt.Errorf("NODE_NAME is not set")
 	}
 
-	// Create database client factory using store-client
-	clientFactory, err := createClientFactory(clientCertMountPath)
+	// Load configuration from environment variables
+	datastoreConfig, err := config.LoadDatastoreConfig()
 	if err != nil {
-		return nil, fmt.Errorf("failed to create database client factory: %w", err)
+		return nil, fmt.Errorf("failed to load datastore config: %w", err)
 	}
 
-	// Create database client
-	databaseClient, err := clientFactory.CreateDatabaseClient(ctx)
+	slog.Info("Creating datastore connection",
+		"provider", datastoreConfig.Provider,
+		"host", datastoreConfig.Connection.Host,
+		"database", datastoreConfig.Connection.Database)
+
+	// Create datastore instance using the factory
+	ds, err := datastore.NewDataStore(ctx, *datastoreConfig)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create database client: %w", err)
+		return nil, fmt.Errorf("failed to create datastore: %w", err)
+	}
+
+	// Ping to verify connection
+	if err := ds.Ping(ctx); err != nil {
+		return nil, fmt.Errorf("failed to ping datastore: %w", err)
 	}
 
 	slog.Info("Successfully initialized database store connector")
 
-	return new(databaseClient, ringbuffer, nodeName), nil
-}
-
-func createClientFactory(databaseClientCertMountPath string) (*factory.ClientFactory, error) {
-	if databaseClientCertMountPath != "" {
-		return factory.NewClientFactoryFromEnvWithCertPath(databaseClientCertMountPath)
-	}
-
-	return factory.NewClientFactoryFromEnv()
+	return new(ds, ringbuffer, nodeName), nil
 }
 
 func (r *DatabaseStoreConnector) FetchAndProcessHealthMetric(ctx context.Context) {
@@ -111,11 +113,11 @@ func (r *DatabaseStoreConnector) FetchAndProcessHealthMetric(ctx context.Context
 // Disconnect closes the database client connection
 // Safe to call multiple times - will not error if already disconnected
 func (r *DatabaseStoreConnector) Disconnect(ctx context.Context) error {
-	if r.databaseClient == nil {
+	if r.dataStore == nil {
 		return nil
 	}
 
-	err := r.databaseClient.Close(ctx)
+	err := r.dataStore.Close(ctx)
 	if err != nil {
 		// Log but don't return error if already disconnected
 		// This can happen in tests where mtest framework also disconnects
@@ -153,7 +155,7 @@ func (r *DatabaseStoreConnector) insertHealthEvents(
 	// Insert all documents in a single batch operation
 	// This ensures MongoDB generates INSERT operations (not UPDATE) for change streams
 	// Note: InsertMany is already atomic - either all documents are inserted or none are
-	_, err := r.databaseClient.InsertMany(ctx, healthEventWithStatusList)
+	err := r.dataStore.InsertMany(ctx, healthEventWithStatusList)
 	if err != nil {
 		return fmt.Errorf("insertMany failed: %w", err)
 	}

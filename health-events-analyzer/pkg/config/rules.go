@@ -12,19 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package config
+package reconciler
 
 import (
 	"fmt"
 
-	"github.com/nvidia/nvsentinel/commons/pkg/configmanager"
+	"github.com/BurntSushi/toml"
 )
 
+type SequenceStep struct {
+	Criteria   map[string]interface{} `toml:"criteria"`
+	ErrorCount int                    `toml:"errorCount"`
+}
+
 type HealthEventsAnalyzerRule struct {
-	Name              string   `toml:"name"`
-	Description       string   `toml:"description"`
-	Stage             []string `toml:"stage"`
-	RecommendedAction string   `toml:"recommended_action"`
+	Name              string         `toml:"name"`
+	Description       string         `toml:"description"`
+	TimeWindow        string         `toml:"time_window"`
+	Sequence          []SequenceStep `toml:"sequence"`
+	RecommendedAction string         `toml:"recommended_action"`
 }
 
 type TomlConfig struct {
@@ -33,7 +39,7 @@ type TomlConfig struct {
 
 func LoadTomlConfig(path string) (*TomlConfig, error) {
 	var config TomlConfig
-	if err := configmanager.LoadTOMLConfig(path, &config); err != nil {
+	if _, err := toml.DecodeFile(path, &config); err != nil {
 		return nil, fmt.Errorf("failed to decode TOML config from %s: %w", path, err)
 	}
 

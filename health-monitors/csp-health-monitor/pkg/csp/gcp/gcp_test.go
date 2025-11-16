@@ -34,7 +34,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/config"
-	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/model"
+	"github.com/nvidia/nvsentinel/data-models/pkg/model"
 )
 
 // mockNormalizer allows faking normalization behavior.

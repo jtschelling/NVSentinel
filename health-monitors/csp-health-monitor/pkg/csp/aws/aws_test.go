@@ -27,7 +27,7 @@ import (
 	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/config"
 	eventpkg "github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/event"
-	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/model"
+	"github.com/nvidia/nvsentinel/data-models/pkg/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"

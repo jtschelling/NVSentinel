@@ -19,6 +19,12 @@ update_settings(k8s_upsert_timeout_secs=600)
 
 num_gpu_nodes = int(os.getenv('NUM_GPU_NODES', '50'))
 num_kata_test_nodes = int(os.getenv('NUM_KATA_TEST_NODES', '5'))
+use_postgresql = os.getenv('USE_POSTGRESQL', '0') == '1'
+
+if use_postgresql:
+    print("Using PostgreSQL as datastore (USE_POSTGRESQL=1)")
+else:
+    print("Using MongoDB as datastore (default). Set USE_POSTGRESQL=1 to use PostgreSQL.")
 
 helm_repo('jetstack', 'https://charts.jetstack.io')
 helm_resource(
@@ -105,6 +111,10 @@ values_files = [
     '../distros/kubernetes/nvsentinel/values-tilt-socket.yaml'  # Ensures /var/run exists for socket
 ]
 
+# Add PostgreSQL values if USE_POSTGRESQL=1
+if use_postgresql:
+    values_files.append('../distros/kubernetes/nvsentinel/values-tilt-postgresql.yaml')
+
 arch = str(local('uname -m')).strip()
 if arch in ['arm64', 'aarch64']:
     values_files.append('../distros/kubernetes/nvsentinel/values-tilt-arm64.yaml')
@@ -117,17 +127,29 @@ yaml = helm(
 )
 k8s_yaml(yaml)
 
-k8s_resource(
-    new_name='cert-manager-resources',
-    objects=[
+# Cert-manager resources vary based on datastore
+cert_manager_objects = ['janitor-webhook-cert:certificate']
+if use_postgresql:
+    cert_manager_objects.extend([
+        'postgresql-root-ca:certificate',
+        'postgresql-ca-issuer:issuer',
+        'selfsigned-ca-issuer:issuer',
+        'postgresql-server-cert:certificate',
+        'postgresql-client-cert:certificate'
+    ])
+else:
+    cert_manager_objects.extend([
         'mongo-root-ca:certificate',
-        'mongo-ca-issuer:issuer', 
+        'mongo-ca-issuer:issuer',
         'selfsigned-ca-issuer:issuer',
         'mongo-server-cert-0:certificate',
         'mongo-app-client-cert:certificate',
-        'mongo-dgxcops-client-cert:certificate',
-        'janitor-webhook-cert:certificate'
-    ],
+        'mongo-dgxcops-client-cert:certificate'
+    ])
+
+k8s_resource(
+    new_name='cert-manager-resources',
+    objects=cert_manager_objects,
     resource_deps=['cert-manager'],
 )
 
@@ -141,6 +163,17 @@ k8s_resource(
     port_forwards='9090:9090',
 )
 
+# Determine datastore resource name based on USE_POSTGRESQL
+datastore_resource = 'nvsentinel-postgresql' if use_postgresql else 'mongodb'
+
+# Configure datastore StatefulSet with optional port forwarding
+if use_postgresql:
+    k8s_resource(
+        workload='nvsentinel-postgresql',
+        port_forwards=['5432:5432'],  # Port-forward PostgreSQL for debugging
+        resource_deps=['cert-manager-resources'],
+    )
+
 # Group all KWOK nodes (regular GPU nodes + separate kata test nodes) for resource management
 if not skip_kwok_nodes:
     kwok_regular_node_names = ['kwok-node-' + str(i) + ':node' for i in range(num_gpu_nodes)]
@@ -150,9 +183,9 @@ if not skip_kwok_nodes:
     k8s_resource(
         new_name='kwok-fake-nodes',
         objects=kwok_all_node_names,
-        resource_deps=['kwok', 'platform-connectors', 'fault-quarantine', 'fault-remediation', 
-            'labeler', 'node-drainer', 'mongodb', 'simple-health-client'
-        ], 
+        resource_deps=['kwok', 'platform-connectors', 'fault-quarantine', 'fault-remediation',
+            'labeler', 'node-drainer', datastore_resource, 'simple-health-client'
+        ],
     )
 
 k8s_resource(
@@ -172,22 +205,22 @@ k8s_resource(
 
 k8s_resource(
     'platform-connectors',
-    resource_deps=['mongodb']
+    resource_deps=[datastore_resource]
 )
 
 k8s_resource(
     'fault-quarantine',
-    resource_deps=['mongodb']
+    resource_deps=[datastore_resource]
 )
 
 k8s_resource(
     'node-drainer',
-    resource_deps=['mongodb']
+    resource_deps=[datastore_resource]
 )
 
 k8s_resource(
     'fault-remediation',
-    resource_deps=['mongodb']
+    resource_deps=[datastore_resource]
 )
 
 k8s_resource(

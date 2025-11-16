@@ -16,13 +16,10 @@ package reconciler
 
 import (
 	"context"
-
-	"github.com/nvidia/nvsentinel/fault-remediation/pkg/crstatus"
 )
 
 type FaultRemediationClientInterface interface {
-	CreateMaintenanceResource(ctx context.Context, healthEventData *HealthEventData) (bool, string)
+	CreateMaintenanceResource(ctx context.Context, healthEventDoc *HealthEventDoc) bool
 	RunLogCollectorJob(ctx context.Context, nodeName string) error
-	GetAnnotationManager() NodeAnnotationManagerInterface
-	GetStatusChecker() *crstatus.CRStatusChecker
+	GetNodeStateLabel(ctx context.Context, nodeName string) (string, error)
 }

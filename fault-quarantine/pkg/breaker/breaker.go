@@ -22,24 +22,16 @@ package breaker
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"math"
 	"time"
 
-	"github.com/nvidia/nvsentinel/fault-quarantine/pkg/metrics"
 	"golang.org/x/exp/maps"
 )
 
 const (
 	resultError = "error"
-)
-
-var (
-	// ErrRetryExhausted signals that GetTotalNodes retry attempts were exhausted
-	// This error should trigger pod restart
-	ErrRetryExhausted = errors.New("circuit breaker: all retry attempts exhausted")
 )
 
 // NewSlidingWindowBreaker creates a new sliding window circuit breaker for fault quarantine.
@@ -62,17 +54,14 @@ func NewSlidingWindowBreaker(ctx context.Context, cfg Config) (CircuitBreaker, e
 		b.indexToNodes[i] = make(map[string]bool)
 	}
 
-	err := cfg.K8sClient.EnsureCircuitBreakerConfigMap(ctx, cfg.ConfigMapName, cfg.ConfigMapNamespace, StateClosed)
+	err := cfg.EnsureConfigMap(ctx, StateClosed)
 	if err != nil {
 		slog.Error("Error ensuring circuit breaker config map", "error", err)
 		return nil, fmt.Errorf("error ensuring circuit breaker config map: %w", err)
 	}
 
-	state, err := cfg.K8sClient.ReadCircuitBreakerState(ctx, cfg.ConfigMapName, cfg.ConfigMapNamespace)
-	if err == nil {
-		if state == StateClosed || state == StateTripped {
-			b.state = state
-		}
+	if s, err := cfg.ReadStateFn(ctx); err == nil && (s == StateClosed || s == StateTripped) {
+		b.state = s
 	}
 
 	return b, nil
@@ -187,7 +176,6 @@ func (b *slidingWindowBreaker) IsTripped(ctx context.Context) (bool, error) {
 
 	if b.state == StateTripped {
 		b.mu.RUnlock()
-
 		return true, nil
 	}
 
@@ -196,7 +184,6 @@ func (b *slidingWindowBreaker) IsTripped(ctx context.Context) (bool, error) {
 	totalNodes, err := b.getTotalNodesWithRetry(ctx)
 	if err != nil {
 		slog.Error("Failed to get total nodes after retries", "error", err)
-
 		return false, fmt.Errorf("failed to get total nodes after retries: %w", err)
 	}
 
@@ -208,20 +195,18 @@ func (b *slidingWindowBreaker) IsTripped(ctx context.Context) (bool, error) {
 	now := time.Now()
 
 	b.mu.Lock()
-
 	b.slideWindow(now)
 	recentCordonedNodes := b.sumBuckets()
 	threshold := int(math.Ceil(float64(totalNodes) * b.cfg.TripPercentage / 100))
 	shouldTrip := recentCordonedNodes >= threshold
-
-	b.mu.Unlock()
 
 	slog.Debug("Recent cordoned nodes status",
 		"recentCordonedNodes", recentCordonedNodes,
 		"totalNodes", totalNodes,
 		"tripPercentage", b.cfg.TripPercentage)
 
-	metrics.SetFaultQuarantineBreakerUtilization(float64(recentCordonedNodes) / float64(totalNodes))
+	SetFaultQuarantineBreakerUtilization(float64(recentCordonedNodes) / float64(totalNodes))
+	b.mu.Unlock()
 
 	if shouldTrip {
 		err := b.ForceState(ctx, StateTripped)
@@ -230,12 +215,12 @@ func (b *slidingWindowBreaker) IsTripped(ctx context.Context) (bool, error) {
 			return true, fmt.Errorf("error forcing circuit breaker state to TRIPPED: %w", err)
 		}
 
-		metrics.SetFaultQuarantineBreakerState(string(StateTripped))
+		SetFaultQuarantineBreakerState(StateTripped)
 
 		return true, nil
 	}
 
-	metrics.SetFaultQuarantineBreakerState(string(StateClosed))
+	SetFaultQuarantineBreakerState(StateClosed)
 
 	return false, nil
 }
@@ -248,11 +233,9 @@ func (b *slidingWindowBreaker) ForceState(ctx context.Context, s State) error {
 	b.state = s
 	b.mu.Unlock()
 
-	err := b.cfg.K8sClient.WriteCircuitBreakerState(
-		ctx, b.cfg.ConfigMapName, b.cfg.ConfigMapNamespace, s)
-	if err != nil {
+	if err := b.cfg.WriteStateFn(ctx, s); err != nil {
 		slog.Error("Error writing circuit breaker state", "error", err)
-		return fmt.Errorf("error writing circuit breaker state: %w", err)
+		return fmt.Errorf("failed to write circuit breaker state %s: %w", s, err)
 	}
 
 	slog.Info("ForceState changed", "state", s)
@@ -280,17 +263,19 @@ func (b *slidingWindowBreaker) getTotalNodesWithRetry(ctx context.Context) (int,
 
 	defer func() {
 		duration := time.Since(startTime).Seconds()
-		metrics.FaultQuarantineGetTotalNodesDuration.WithLabelValues(result).Observe(duration)
+		faultQuarantineGetTotalNodesDuration.WithLabelValues(result).Observe(duration)
 
 		if errorType != "" {
-			metrics.FaultQuarantineGetTotalNodesErrors.WithLabelValues(errorType).Inc()
+			faultQuarantineGetTotalNodesErrors.WithLabelValues(errorType).Inc()
 		}
 	}()
 
 	maxRetries, initialDelay, maxDelay := b.getRetryConfig()
 
+	var lastErr error
+
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		totalNodes, err := b.cfg.K8sClient.GetTotalNodes(ctx)
+		totalNodes, err := b.cfg.GetTotalNodes(ctx)
 		if err != nil {
 			result = resultError
 			errorType = "api_error"
@@ -301,15 +286,14 @@ func (b *slidingWindowBreaker) getTotalNodesWithRetry(ctx context.Context) (int,
 		if totalNodes > 0 {
 			result = "success"
 
-			metrics.FaultQuarantineGetTotalNodesRetryAttempts.Observe(float64(attempt))
+			faultQuarantineGetTotalNodesRetryAttempts.Observe(float64(attempt))
 
 			return b.handleSuccessfulNodeCount(totalNodes, attempt)
 		}
 
-		if attempt == 0 {
-			slog.Info("Circuit breaker starting retries: NodeInformer cache may not be synced yet",
-				"maxRetries", maxRetries)
-		}
+		// Store error for final return (only last value is used)
+		//nolint:staticcheck // SA4006: intermediate values overwritten, only final used
+		lastErr = b.handleZeroNodes(attempt, maxRetries)
 
 		if attempt < maxRetries {
 			if err := b.performRetryDelay(ctx, attempt, maxRetries, initialDelay, maxDelay); err != nil {
@@ -322,10 +306,14 @@ func (b *slidingWindowBreaker) getTotalNodesWithRetry(ctx context.Context) (int,
 	}
 
 	// All retries exhausted
+	if err := b.logRetriesExhausted(maxRetries, initialDelay, maxDelay); err != nil {
+		return 0, fmt.Errorf("error logging retries exhausted: %w", err)
+	}
+
 	result = resultError
 	errorType = "zero_nodes"
 
-	return 0, b.logRetriesExhausted(ctx, maxRetries, initialDelay, maxDelay)
+	return 0, lastErr
 }
 
 // getRetryConfig extracts and validates retry configuration with defaults
@@ -369,6 +357,18 @@ func (b *slidingWindowBreaker) handleSuccessfulNodeCount(totalNodes, attempt int
 	return totalNodes, nil
 }
 
+// handleZeroNodes handles the case when GetTotalNodes returns 0
+func (b *slidingWindowBreaker) handleZeroNodes(attempt, maxRetries int) error {
+	lastErr := fmt.Errorf("GetTotalNodes returned 0 nodes (likely NodeInformer cache not synced yet)")
+
+	if attempt == 0 {
+		slog.Info("Circuit breaker starting retries: NodeInformer cache may not be synced yet",
+			"maxRetries", maxRetries)
+	}
+
+	return lastErr
+}
+
 // performRetryDelay calculates and performs the exponential backoff delay
 func (b *slidingWindowBreaker) performRetryDelay(ctx context.Context, attempt, maxRetries int,
 	initialDelay, maxDelay time.Duration) error {
@@ -407,11 +407,14 @@ func (b *slidingWindowBreaker) calculateBackoffDelay(attempt int,
 	return delay
 }
 
-// logRetriesExhausted logs a summary when all retries are exhausted.
-// Returns ErrRetryExhausted wrapped with context for pod restart.
-func (b *slidingWindowBreaker) logRetriesExhausted(ctx context.Context, maxRetries int,
-	initialDelay, maxDelay time.Duration) error {
-	actualNodes, err := b.cfg.K8sClient.GetTotalNodes(ctx)
+// logRetriesExhausted logs a summary when all retries are exhausted and crashes the pod.
+// It attempts to get the actual node count for accurate error context.
+// Returns an error if unable to get the node count.
+func (b *slidingWindowBreaker) logRetriesExhausted(maxRetries int, initialDelay, maxDelay time.Duration) error {
+	// Get the actual node count from the last attempt to provide accurate error context
+	ctx := context.Background()
+
+	actualNodes, err := b.cfg.GetTotalNodes(ctx)
 	if err != nil {
 		slog.Error(
 			"Circuit breaker: All retry attempts exhausted; failed to get node count from Kubernetes API; pod will restart",
@@ -421,17 +424,8 @@ func (b *slidingWindowBreaker) logRetriesExhausted(ctx context.Context, maxRetri
 			"totalClusterNodes", actualNodes,
 			"maxDelay", maxDelay)
 
-		return fmt.Errorf("%w: failed to get node count: %w", ErrRetryExhausted, err)
+		return nil
 	}
 
-	slog.Error("Circuit breaker: All retry attempts exhausted",
-		"maxRetries", maxRetries,
-		"actualNodes", actualNodes,
-		"initialDelay", initialDelay,
-		"maxDelay", maxDelay,
-		"message",
-		"Found total nodes but GetTotalNodes still returning 0. NodeInformer cache sync issues. Pod will restart.")
-
-	return fmt.Errorf("%w: NodeInformer cache sync failed after %d retries (actualNodes=%d but GetTotalNodes returning 0)",
-		ErrRetryExhausted, maxRetries, actualNodes)
+	return fmt.Errorf("error getting total nodes after %d retries", maxRetries)
 }

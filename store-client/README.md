@@ -1,240 +1,66 @@
 # Store Client SDK
 
-Database abstraction layer for NVSentinel components. Provides a unified interface for database operations (MongoDB currently, PostgreSQL planned) with support for change streams, transactions, and domain-specific queries.
+A Go SDK that provides a unified interface for connecting to MongoDB datastore and watching for change events. This SDK abstracts datastore-specific implementations behind a common interface, making it easy to add new providers.
 
-## Quick Start
+## Core Interfaces
 
-### Basic Usage
+The SDK is built around several key interfaces defined in `pkg/datastore/interface.go`:
 
-Most modules use the helper package for initialization:
+### DataStore
+The main interface that all providers must implement:
+- **MaintenanceEventStore()** - For CSP maintenance events (used by health monitors)
+- **HealthEventStore()** - For platform health events (used by platform connectors)
+- **InsertMany()** - Generic bulk insert operations
+- **Ping()** / **Close()** - Connection management
 
-```go
-import (
-    "github.com/nvidia/nvsentinel/store-client/pkg/helper"
-    _ "github.com/nvidia/nvsentinel/store-client/pkg/datastore/providers/mongodb"
-)
+### MaintenanceEventStore
+Handles CSP maintenance events with operations like:
+- Upserting events, finding events to trigger quarantine/healthy status
+- Updating event status, getting last processed timestamps
+- Finding active events by node and type
 
-// Create database client only (no change streams)
-dbClient, err := helper.NewDatabaseClientOnly(ctx, "my-module")
-if err != nil {
-    return err
-}
-defer dbClient.Close(ctx)
+### HealthEventStore
+Handles platform health events with operations for:
+- Inserting health events with status
+- Updating health event status
+- Finding events by node or custom filters
 
-// Use the client
-filter := map[string]interface{}{"nodename": "node-1"}
-cursor, err := dbClient.Find(ctx, filter, nil)
-```
+### Change Stream Support
+The SDK provides change stream watching capabilities:
+- **ChangeStreamWatcher** - Basic change stream functionality
+- **FilteredChangeStreamFactory** - Creates filtered change stream watchers
+- **EnhancedDataStore** - Extended interface supporting filtered change streams
 
-### With Change Streams
+## Supported Providers
 
-For modules that need to watch database changes:
+Currently supported datastore providers:
+- **MongoDB** (`ProviderMongoDB`)
 
-```go
-// Define your change stream pipeline
-pipeline := client.BuildNonFatalUnhealthyInsertsPipeline()
+## Adding a New Provider
 
-// Create complete bundle (database + change stream watcher)
-bundle, err := helper.NewDatastoreClient(ctx, helper.DatastoreClientConfig{
-    ModuleName: "my-module",
-    Pipeline:   pipeline,
-})
-if err != nil {
-    return err
-}
-defer bundle.Close(ctx)
+To add a new datastore provider:
 
-// Use database client
-dbClient := bundle.DatabaseClient
+1. **Create provider package**: Create a new directory under `pkg/datastore/providers/your-provider/`
 
-// Use change stream watcher
-watcher := bundle.ChangeStreamWatcher
-watcher.Start(ctx)
-for event := range watcher.Events() {
-    // Process event
-}
-```
+2. **Implement required interfaces**: Your provider must implement:
+   - `DataStore` interface (and optionally `EnhancedDataStore` for change streams)
+   - `MaintenanceEventStore` interface
+   - `HealthEventStore` interface
 
-### Using Provided Config
+3. **Create registration function**: Add a `register.go` file with an `init()` function:
+   ```go
+   func init() {
+       datastore.RegisterProvider("your-provider", NewYourProviderDataStore)
+   }
+   ```
 
-If you already have a `DataStoreConfig`:
+4. **Provider factory function**: Implement a factory function matching the signature:
+   ```go
+   func NewYourProviderDataStore(ctx context.Context, config datastore.DataStoreConfig) (datastore.DataStore, error)
+   ```
 
-```go
-config, err := datastore.LoadDatastoreConfig()
-if err != nil {
-    return err
-}
+5. **Update constants**: Add your provider to the `DataStoreProvider` constants in `interface.go`
 
-bundle, err := helper.NewDatastoreClientFromConfig(
-    ctx, "my-module", *config, pipeline,
-)
-if err != nil {
-    return err
-}
-defer bundle.Close(ctx)
-```
+6. **Import for registration**: Ensure your provider is imported somewhere so the `init()` function runs. See examples in existing provider imports.
 
-## Configuration
-
-### Environment Variables
-
-Required:
-- `DATASTORE_PROVIDER` - Database provider (currently `mongodb`)
-- `DATASTORE_HOST` - Database host
-- `DATASTORE_USERNAME` - Database username
-- `DATASTORE_PASSWORD` - Database password
-
-Optional:
-- `DATASTORE_PORT` - Database port (defaults: 27017 for MongoDB)
-- `DATASTORE_DATABASE` - Database name (default: `nvsentinel`)
-- `DATASTORE_SSLMODE` - SSL mode for connections
-- `DATASTORE_SSLCERT` - Path to client certificate
-- `DATASTORE_SSLKEY` - Path to client key
-- `DATASTORE_SSLROOTCERT` - Path to CA certificate
-
-For change streams (if needed):
-- `RESUME_TOKEN_DATABASE` - Database for storing resume tokens
-- `RESUME_TOKEN_COLLECTION` - Collection for resume tokens
-
-### TLS Certificates
-
-The SDK looks for certificates in these locations (in order):
-1. Custom path from `DATASTORE_SSLCERT` / `DATASTORE_SSLKEY` / `DATASTORE_SSLROOTCERT`
-2. Path provided via `DatabaseClientCertMountPath` in config
-3. Environment variable `MONGODB_CLIENT_CERT_MOUNT_PATH`
-4. Legacy path `/etc/ssl/mongo-client` (backward compatibility)
-
-## Key Interfaces
-
-### DatabaseClient
-Core database operations - queries, updates, transactions:
-```go
-type DatabaseClient interface {
-    Find(ctx, filter, options) (Cursor, error)
-    FindOne(ctx, filter, options) (SingleResult, error)
-    InsertMany(ctx, documents) (*InsertManyResult, error)
-    UpdateDocument(ctx, filter, update) (*UpdateResult, error)
-    Aggregate(ctx, pipeline) (Cursor, error)
-    WithTransaction(ctx, func) error
-    Close(ctx) error
-}
-```
-
-### ChangeStreamWatcher
-Real-time event streaming from database changes:
-```go
-type ChangeStreamWatcher interface {
-    Start(ctx)
-    Events() <-chan Event              // Returns cached channel - safe to call multiple times
-    MarkProcessed(ctx, token) error
-    Close(ctx) error
-}
-```
-
-**Note:** `Events()` returns a cached channel that's initialized once. Multiple calls to `Events()` return the same channel instance, making it safe to call directly in select loops and other control flow structures.
-
-### EventProcessor
-Unified event processing with retry logic and metrics:
-```go
-processor := client.NewEventProcessor(watcher, dbClient, config)
-processor.SetEventHandler(func(ctx, event) error {
-    // Your processing logic
-    return nil
-})
-processor.Start(ctx)
-```
-
-## Common Patterns
-
-### Query Examples
-
-```go
-// Simple query
-filter := map[string]interface{}{
-    "healthevent.nodename": "node-1",
-    "healthevent.isfatal": true,
-}
-cursor, err := dbClient.Find(ctx, filter, nil)
-
-// Using filter builder
-filter := client.NewFilterBuilder().
-    Eq("nodename", "node-1").
-    Eq("status", "active").
-    Build()
-
-// Aggregation
-pipeline := client.BuildSequenceFacetPipeline(sequences)
-cursor, err := dbClient.Aggregate(ctx, pipeline)
-```
-
-### Update Operations
-
-```go
-// Update single document
-filter := map[string]interface{}{"_id": id}
-update := map[string]interface{}{
-    "$set": map[string]interface{}{
-        "healtheventstatus.faultremediated": true,
-    },
-}
-result, err := dbClient.UpdateDocument(ctx, filter, update)
-
-// Bulk update
-filter := map[string]interface{}{"healthevent.nodename": nodeName}
-result, err := dbClient.UpdateManyDocuments(ctx, filter, update)
-```
-
-### Transactions
-
-```go
-err := dbClient.WithTransaction(ctx, func(sessCtx client.SessionContext) error {
-    // All operations here are atomic
-    _, err := dbClient.UpdateDocument(sessCtx, filter1, update1)
-    if err != nil {
-        return err
-    }
-    _, err = dbClient.InsertMany(sessCtx, documents)
-    return err
-})
-```
-
-## Architecture
-
-```text
-┌─────────────────┐
-│  Your Module    │
-└────────┬────────┘
-         │
-         ├─── helper.NewDatastoreClient() ──┐
-         │                                   │
-         ├─── DatabaseClient ────────────────┤
-         │    (queries, updates)             │
-         │                                   │
-         ├─── ChangeStreamWatcher ──────────┤
-         │    (real-time events)             │
-         │                                   │
-         └─── EventProcessor ────────────────┤
-              (event pipeline)               │
-                                             │
-                                    ┌────────▼────────┐
-                                    │  Provider       │
-                                    │  (MongoDB)      │
-                                    └─────────────────┘
-```
-
-## Provider Registration
-
-Import the MongoDB provider to register it:
-```go
-import _ "github.com/nvidia/nvsentinel/store-client/pkg/datastore/providers/mongodb"
-```
-
-The underscore import ensures the provider's `init()` function runs and registers itself with the SDK.
-
-## Further Reading
-
-- **[DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md)** - Comprehensive guide with advanced usage, best practices, and detailed examples
-- **Examples in codebase:**
-  - `health-events-analyzer/pkg/reconciler/reconciler.go` - Change streams with event processing
-  - `node-drainer/pkg/initializer/init.go` - Database client with queries
-  - `fault-quarantine/pkg/reconciler/reconciler.go` - Change streams with filtering
+The factory pattern with automatic registration allows providers to be plugged in simply by importing their package. The `DataStoreConfig` struct provides a generic configuration format that can be adapted to any provider's connection requirements.

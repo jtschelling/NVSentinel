@@ -19,49 +19,53 @@
 # MODULE-SPECIFIC CONFIGURATION
 # =============================================================================
 
+# Module type and capabilities
 IS_GO_MODULE := 1
-IS_KO_MODULE := 1
+HAS_DOCKER := 1
 
 # Health-events-analyzer specific settings
 CLEAN_EXTRA_FILES := health-events-analyzer
+DOCKER_EXTRA_ARGS :=
 
 # =============================================================================
-# INCLUDE SHARED DEFINITIONS
+# INCLUDE COMMON DEFINITIONS
 # =============================================================================
 
 include ../make/common.mk
 include ../make/go.mk
+include ../make/docker.mk
 
 # =============================================================================
-# DEFAULT TARGET
+# LEGACY COMPATIBILITY
 # =============================================================================
 
-.PHONY: all
-all: lint-test
+# Legacy targets for backwards compatibility
+.PHONY: image publish
+image: docker-build
+publish: docker-publish
 
 # =============================================================================
 # MODULE HELP
 # =============================================================================
 
-.PHONY: help
 help:
-	@echo "Health Events Analyzer Makefile - Using nvsentinel make/*.mk standards"
+	@echo "Health Events Analyzer Makefile - Using nvsentinel common.mk standards"
 	@echo ""
 	@echo "This module analyzes and processes health events from various sources."
 	@echo ""
-	@echo "Main targets: all, lint-test, ci-test, build, test, lint, clean"
+	@echo "Configuration (environment variables):"
+	@echo "  MODULE_NAME=$(MODULE_NAME)"
+	@echo "  REPO_ROOT=$(REPO_ROOT)"
 	@echo ""
 	@echo "Main targets:"
 	@echo "  all        - Run lint-test (standardized default)"
 	@echo "  lint-test  - Run full lint and test suite"
 	@echo ""
 	@echo "Individual targets:"
-	@echo "  vet, lint, test, coverage, build, binary, ko-build, ko-publish"
+	@echo "  vet, lint, test, coverage, build, binary"
 	@echo ""
-	@echo "Build notes:"
-	@echo "  - Container images are built using ko"
-	@echo "  - Use 'make ko-build' for local builds (KO_DOCKER_REPO=ko.local by default)"
-	@echo "  - Use 'make ko-publish' to build and push (set KO_DOCKER_REPO and VERSION)"
-	@echo "  - For Tilt development, see Tiltfile"
-	@echo "  - Platforms configured in .ko.yaml (linux/amd64, linux/arm64)"
-
+	@echo "Docker targets:"
+	@echo "  docker-build, docker-publish, image, publish"
+	@echo ""
+	@echo "Module-specific notes:"
+	@echo "  - Uses standardized repo-root Docker build context"

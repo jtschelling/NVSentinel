@@ -15,24 +15,24 @@
 package common
 
 import (
-	"github.com/nvidia/nvsentinel/data-models/pkg/protos"
+	platformconnector "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 )
 
 // RemediationEquivalenceGroups defines groups of remediation actions that are considered
 // to have the same operational effect. This is used to prevent multiple, similar remediations
 // (like various forms of reboots) from occurring in rapid succession.
 // TODO: Fix this multiple mappings as part of https://jirasw.nvidia.com/browse/KACE-1736
-var RemediationEquivalenceGroups = map[string][]protos.RecommendedAction{
+var RemediationEquivalenceGroups = map[string][]platformconnector.RecommendedAction{
 	"restart": {
-		protos.RecommendedAction_COMPONENT_RESET,
-		protos.RecommendedAction_RESTART_VM,
-		protos.RecommendedAction_RESTART_BM,
+		platformconnector.RecommendedAction_COMPONENT_RESET,
+		platformconnector.RecommendedAction_RESTART_VM,
+		platformconnector.RecommendedAction_RESTART_BM,
 	},
 }
 
 // GetRemediationGroupForAction returns the equivalence group key for a given action.
 // If the action is not part of any group, it returns an empty string.
-func GetRemediationGroupForAction(action protos.RecommendedAction) string {
+func GetRemediationGroupForAction(action platformconnector.RecommendedAction) string {
 	for group, actions := range RemediationEquivalenceGroups {
 		for _, a := range actions {
 			if a == action {
@@ -45,7 +45,7 @@ func GetRemediationGroupForAction(action protos.RecommendedAction) string {
 }
 
 // GetActionsForGroup returns all actions that belong to a given equivalence group.
-func GetActionsForGroup(group string) []protos.RecommendedAction {
+func GetActionsForGroup(group string) []platformconnector.RecommendedAction {
 	if actions, ok := RemediationEquivalenceGroups[group]; ok {
 		return actions
 	}
@@ -54,7 +54,7 @@ func GetActionsForGroup(group string) []protos.RecommendedAction {
 }
 
 // IsActionInGroup checks if an action belongs to a specific equivalence group
-func IsActionInGroup(action protos.RecommendedAction, group string) bool {
+func IsActionInGroup(action platformconnector.RecommendedAction, group string) bool {
 	actions, ok := RemediationEquivalenceGroups[group]
 	if !ok {
 		return false

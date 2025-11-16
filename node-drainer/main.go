@@ -19,19 +19,19 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"syscall"
 
-	"github.com/nvidia/nvsentinel/commons/pkg/flags"
 	"github.com/nvidia/nvsentinel/commons/pkg/logger"
-	"github.com/nvidia/nvsentinel/commons/pkg/server"
-	"github.com/nvidia/nvsentinel/data-models/pkg/model"
-	"github.com/nvidia/nvsentinel/node-drainer/pkg/initializer"
-	"github.com/nvidia/nvsentinel/store-client/pkg/client"
+	"github.com/nvidia/nvsentinel/node-drainer/pkg/config"
+	"github.com/nvidia/nvsentinel/node-drainer/pkg/reconciler"
+	"github.com/nvidia/nvsentinel/statemanager"
+	sdkconfig "github.com/nvidia/nvsentinel/store-client/pkg/config"
 	"github.com/nvidia/nvsentinel/store-client/pkg/datastore"
-	"golang.org/x/sync/errgroup"
+	_ "github.com/nvidia/nvsentinel/store-client/pkg/datastore/providers" // Register all datastore providers
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 var (
@@ -40,21 +40,6 @@ var (
 	commit  = "none"
 	date    = "unknown"
 )
-
-// dataStoreAdapter adapts client.DatabaseClient to queue.DataStore
-type dataStoreAdapter struct {
-	client.DatabaseClient
-}
-
-func (d *dataStoreAdapter) FindDocument(ctx context.Context, filter interface{},
-	options *client.FindOneOptions) (client.SingleResult, error) {
-	return d.FindOne(ctx, filter, options)
-}
-
-func (d *dataStoreAdapter) FindDocuments(ctx context.Context, filter interface{},
-	options *client.FindOptions) (client.Cursor, error) {
-	return d.Find(ctx, filter, options)
-}
 
 func main() {
 	logger.SetDefaultStructuredLogger("node-drainer", version)
@@ -70,243 +55,116 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	metricsPort := flag.String("metrics-port", "2112", "port to expose Prometheus metrics on")
+	var metricsPort = flag.String("metrics-port", "2112", "port to expose Prometheus metrics on")
 
-	// Register database certificate flags using common package
-	certConfig := flags.RegisterDatabaseCertFlags()
-	kubeconfigPath := flag.String("kubeconfig-path", "", "path to kubeconfig file")
+	// Legacy MongoDB flag - kept for backward compatibility but ignored
+	var _ = flag.String(
+		"mongo-client-cert-mount-path", "",
+		"DEPRECATED: MongoDB client cert mount path (ignored, use datastore abstraction instead)",
+	)
 
-	tomlConfigPath := flag.String("config-path", "/etc/config/config.toml",
+	var kubeconfigPath = flag.String("kubeconfig-path", "", "path to kubeconfig file")
+
+	var tomlConfigPath = flag.String("config-path", "/etc/config/config.toml",
 		"path where the node drainer config file is present")
 
-	dryRun := flag.Bool("dry-run", false, "flag to run node drainer module in dry-run mode")
+	var dryRun = flag.Bool("dry-run", false, "flag to run node drainer module in dry-run mode")
 
 	flag.Parse()
 
-	// Resolve the certificate path using common logic
-	databaseClientCertMountPath := certConfig.ResolveCertPath()
+	// Start metrics server
+	slog.Info("Starting metrics server", "port", *metricsPort)
 
-	slog.Info("Database client cert", "path", databaseClientCertMountPath)
-
-	params := initializer.InitializationParams{
-		DatabaseClientCertMountPath: databaseClientCertMountPath,
-		KubeconfigPath:              *kubeconfigPath,
-		TomlConfigPath:              *tomlConfigPath,
-		MetricsPort:                 *metricsPort,
-		DryRun:                      *dryRun,
-	}
-
-	components, err := initializer.InitializeAll(ctx, params)
-	if err != nil {
-		return fmt.Errorf("failed to initialize components: %w", err)
-	}
-
-	// Informers must sync before processing events
-	slog.Info("Starting Kubernetes informers")
-
-	if err := components.Informers.Run(ctx); err != nil {
-		return fmt.Errorf("failed to start informers: %w", err)
-	}
-
-	slog.Info("Kubernetes informers started and synced")
-
-	slog.Info("Starting queue worker")
-	components.QueueManager.Start(ctx)
-
-	// Handle cold start - re-process any events that were in-progress during restart
-	slog.Info("Handling cold start")
-
-	if err := handleColdStart(ctx, components); err != nil {
-		slog.Error("Cold start handling failed", "error", err)
-	}
-
-	slog.Info("Starting database event watcher")
-
-	criticalError := make(chan error)
-	startEventWatcher(ctx, components, criticalError)
-
-	slog.Info("All components started successfully")
-
-	srv, err := createMetricsServer(*metricsPort)
-	if err != nil {
-		return err
-	}
-
-	// Start server in errgroup alongside event watcher monitoring
-	g, gCtx := errgroup.WithContext(ctx)
-
-	// Start the metrics/health server
-	startMetricsServer(g, gCtx, srv)
-
-	// Monitor for critical errors or graceful shutdown signals.
-	g.Go(func() error {
-		select {
-		case <-gCtx.Done():
-			// Context was cancelled (SIGTERM/SIGINT or another goroutine failed)
-			slog.Info("Context cancelled, initiating shutdown")
-		case err := <-criticalError:
-			// Critical component (event watcher) failed
-			slog.Error("Critical component failure", "error", err)
-			stop() // Cancel context to trigger shutdown of other components
-
-			if shutdownErr := shutdownComponents(ctx, components); shutdownErr != nil {
-				return fmt.Errorf("failed to close event watcher: %w", shutdownErr)
-			}
-
-			return fmt.Errorf("critical component failure: %w", err)
-		}
-
-		// Normal shutdown path (context cancelled without critical error)
-		return shutdownComponents(ctx, components)
-	})
-
-	// Wait for both goroutines to finish
-	return g.Wait()
-}
-
-// createMetricsServer creates and configures the metrics server
-func createMetricsServer(metricsPort string) (server.Server, error) {
-	portInt, err := strconv.Atoi(metricsPort)
-	if err != nil {
-		return nil, fmt.Errorf("invalid metrics port: %w", err)
-	}
-
-	srv := server.NewServer(
-		server.WithPort(portInt),
-		server.WithPrometheusMetrics(),
-		server.WithSimpleHealth(),
-	)
-
-	return srv, nil
-}
-
-// startMetricsServer starts the metrics server in an errgroup
-func startMetricsServer(g *errgroup.Group, gCtx context.Context, srv server.Server) {
-	g.Go(func() error {
-		slog.Info("Starting metrics server")
-
-		if err := srv.Serve(gCtx); err != nil {
-			slog.Error("Metrics server failed - continuing without metrics", "error", err)
-		}
-
-		return nil
-	})
-}
-
-// startEventWatcher starts the event watcher goroutine
-func startEventWatcher(ctx context.Context, components *initializer.Components, criticalError chan<- error) {
 	go func() {
-		// Start the change stream watcher
-		components.EventWatcher.Start(ctx)
-		slog.Info("Event watcher started, consuming events")
-
-		// Consume events from the change stream
-		for event := range components.EventWatcher.Events() {
-			// Preprocess and enqueue the event
-			// This sets the initial status to InProgress and enqueues the event for processing
-			if err := components.Reconciler.PreprocessAndEnqueueEvent(ctx, event); err != nil {
-				// Don't send to criticalError - just log and continue processing other events
-				slog.Error("Failed to preprocess and enqueue event", "error", err)
-				continue
-			}
-
-			// Mark the event as processed (save resume token) AFTER successful preprocessing
-			// Extract the resume token from the event to avoid race condition
-			resumeToken := event.GetResumeToken()
-			if err := components.EventWatcher.MarkProcessed(ctx, resumeToken); err != nil {
-				// Don't send to criticalError - just log and continue
-				slog.Error("Error updating resume token", "error", err)
-			}
+		http.Handle("/metrics", promhttp.Handler())
+		http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("ok"))
+		})
+		//nolint:gosec // G114: Ignoring the use of http.ListenAndServe without timeouts
+		err := http.ListenAndServe(":"+*metricsPort, nil)
+		if err != nil {
+			slog.Error("Failed to start metrics server", "error", err)
+			os.Exit(1)
 		}
-
-		slog.Info("Event watcher stopped")
 	}()
-}
 
-// handleColdStart re-processes events that were in-progress or quarantined during a restart
-func handleColdStart(ctx context.Context, components *initializer.Components) error {
-	slog.Info("Querying for events requiring processing")
+	slog.Info("Metrics server goroutine started")
 
-	// Query for events that need processing:
-	// 1. Events with StatusInProgress (actively being processed when we went down)
-	// 2. Events that are Quarantined but haven't started processing yet (status is empty or NotStarted)
-	// This handles cases where node-drainer was restarted after quarantine but before processing started
-	filter := map[string]interface{}{
-		"$or": []interface{}{
-			// Case 1: Events that were in-progress
-			map[string]interface{}{
-				"healtheventstatus.userpodsevictionstatus.status": string(model.StatusInProgress),
-			},
-			// Case 2: Quarantined events that haven't been processed yet
-			map[string]interface{}{
-				"healtheventstatus.nodequarantined": string(model.Quarantined),
-				"healtheventstatus.userpodsevictionstatus.status": map[string]interface{}{
-					"$in": []interface{}{"", string(model.StatusNotStarted)},
-				},
-			},
-			// Case 3: AlreadyQuarantined events that haven't been processed yet
-			map[string]interface{}{
-				"healtheventstatus.nodequarantined": string(model.AlreadyQuarantined),
-				"healtheventstatus.userpodsevictionstatus.status": map[string]interface{}{
-					"$in": []interface{}{"", string(model.StatusNotStarted)},
-				},
-			},
-		},
-	}
-
-	// Use Find to get all events requiring processing
-	cursor, err := components.DatabaseClient.Find(ctx, filter, nil)
+	// Load datastore configuration
+	datastoreConfig, err := sdkconfig.LoadDatastoreConfig()
 	if err != nil {
-		return fmt.Errorf("failed to query events for cold start: %w", err)
-	}
-	defer cursor.Close(ctx)
-
-	var events []datastore.Event
-	if err := cursor.All(ctx, &events); err != nil {
-		return fmt.Errorf("failed to decode events for cold start: %w", err)
+		return fmt.Errorf("failed to load datastore configuration: %w", err)
 	}
 
-	slog.Info("Found events to re-process", "count", len(events))
-
-	// Re-process each event
-	for _, event := range events {
-		// Extract health event (datastore.Event is map[string]interface{})
-		healthEvent, ok := event["healthevent"].(datastore.Event)
-		if !ok {
-			slog.Error("Failed to extract healthevent from cold start event")
-			continue
-		}
-
-		nodeName, ok := healthEvent["nodename"].(string)
-		if !ok {
-			slog.Error("Failed to extract node name from cold start event")
-			continue
-		}
-
-		// Create adapter to bridge interface differences
-		dbAdapter := &dataStoreAdapter{DatabaseClient: components.DatabaseClient}
-		if err := components.QueueManager.EnqueueEventGeneric(ctx, nodeName, event, dbAdapter); err != nil {
-			slog.Error("Failed to enqueue cold start event", "error", err, "nodeName", nodeName)
-		} else {
-			slog.Info("Re-queued event from cold start", "nodeName", nodeName)
-		}
+	// Create datastore instance
+	dataStore, err := datastore.NewDataStore(ctx, *datastoreConfig)
+	if err != nil {
+		return fmt.Errorf("failed to create datastore: %w", err)
 	}
 
-	slog.Info("Cold start processing completed")
+	defer func() {
+		if err := dataStore.Close(ctx); err != nil {
+			slog.Error("Failed to close datastore", "error", err)
+		}
+	}()
+
+	// Test datastore connection
+	if err := dataStore.Ping(ctx); err != nil {
+		return fmt.Errorf("failed to ping datastore: %w", err)
+	}
+
+	slog.Info("Successfully connected to datastore", "provider", datastoreConfig.Provider)
+
+	tomlCfg, err := config.LoadTomlConfig(*tomlConfigPath)
+	if err != nil {
+		return fmt.Errorf("error while loading the toml config: %w", err)
+	}
+
+	if *dryRun {
+		slog.Info("Running in dry-run mode")
+	}
+
+	// Initialize the k8s client with pod timeout configuration
+	k8sClient, clientSet, err := reconciler.NewNodeDrainerClient(*kubeconfigPath, *dryRun, &tomlCfg.NotReadyTimeoutMinutes)
+	if err != nil {
+		return fmt.Errorf("error while initializing kubernetes client: %w", err)
+	}
+
+	slog.Info("Successfully initialized k8sclient")
+
+	// Create pipeline to watch for UPDATE events where nodequarantined changes
+	pipeline := createNodeDrainerPipeline()
+
+	reconcilerCfg := reconciler.ReconcilerConfig{
+		TomlConfig:   *tomlCfg,
+		DataStore:    dataStore,
+		Pipeline:     pipeline,
+		K8sClient:    k8sClient,
+		StateManager: statemanager.NewStateManager(clientSet),
+	}
+
+	reconciler := reconciler.NewReconciler(reconcilerCfg, *dryRun)
+	reconciler.Start(ctx)
 
 	return nil
 }
 
-// shutdownComponents handles the shutdown of components
-func shutdownComponents(ctx context.Context, components *initializer.Components) error {
-	slog.Info("Shutting down node drainer")
-
-	if errStop := components.EventWatcher.Close(ctx); errStop != nil {
-		return fmt.Errorf("failed to close event watcher: %w", errStop)
+// createNodeDrainerPipeline creates a database-agnostic aggregation pipeline that filters
+// change stream events to only include UPDATE operations where nodequarantined changes.
+// Note: The MongoDB update sets flat fields (not nested), so we match "nodeQuarantined"
+// not "healtheventstatus.nodequarantined"
+// See store-client-sdk/pkg/datastore/providers/mongodb/datastore.go:666
+func createNodeDrainerPipeline() datastore.Pipeline {
+	return datastore.Pipeline{
+		datastore.D(
+			datastore.E("$match", datastore.D(
+				datastore.E("operationType", "update"),
+				datastore.E("$or", datastore.A(
+					datastore.D(datastore.E("updateDescription.updatedFields.nodeQuarantined", datastore.Quarantined)),
+					datastore.D(datastore.E("updateDescription.updatedFields.nodeQuarantined", datastore.UnQuarantined)),
+				)),
+			)),
+		),
 	}
-
-	components.QueueManager.Shutdown()
-	slog.Info("Node drainer stopped")
-
-	return nil
 }

@@ -7,7 +7,6 @@ toolchain go1.25.3
 require (
 	github.com/BurntSushi/toml v1.5.0
 	github.com/nvidia/nvsentinel/data-models v0.0.0
-	github.com/nvidia/nvsentinel/store-client v0.0.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/sync v0.18.0
@@ -51,8 +50,11 @@ require (
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.67.2 // indirect
 	github.com/prometheus/procfs v0.17.0 // indirect
+	github.com/rogpeppe/go-internal v1.14.1 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
+	go.opentelemetry.io/otel/metric v1.38.0 // indirect
+	go.opentelemetry.io/otel/trace v1.38.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.3 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/net v0.46.0 // indirect

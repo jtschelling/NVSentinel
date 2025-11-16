@@ -2,21 +2,20 @@ module github.com/nvidia/nvsentinel/node-drainer
 
 go 1.25
 
-toolchain go1.25.3
-
 require (
 	github.com/BurntSushi/toml v1.5.0
 	github.com/hashicorp/go-multierror v1.1.1
 	github.com/nvidia/nvsentinel/commons v0.0.0
 	github.com/nvidia/nvsentinel/data-models v0.0.0
+	github.com/nvidia/nvsentinel/statemanager v0.0.0
 	github.com/nvidia/nvsentinel/store-client v0.0.0
 	github.com/prometheus/client_golang v1.23.2
-	github.com/prometheus/client_model v0.6.2
 	github.com/stretchr/testify v1.11.1
-	golang.org/x/sync v0.18.0
 	k8s.io/api v0.34.1
 	k8s.io/apimachinery v0.34.1
 	k8s.io/client-go v0.34.1
+	k8s.io/klog v1.0.0
+	k8s.io/klog/v2 v2.130.1
 	k8s.io/utils v0.0.0-20251002143259-bc988d571ff4
 	sigs.k8s.io/controller-runtime v0.22.4
 )
@@ -52,11 +51,13 @@ require (
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/klauspost/compress v1.18.0 // indirect
+	github.com/lib/pq v1.10.9 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.3-0.20250322232337-35a7c28c31ee // indirect
 	github.com/montanaflynn/stats v0.7.1 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
+	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.67.2 // indirect
 	github.com/prometheus/procfs v0.17.0 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
@@ -73,6 +74,7 @@ require (
 	golang.org/x/mod v0.29.0 // indirect
 	golang.org/x/net v0.46.0 // indirect
 	golang.org/x/oauth2 v0.32.0 // indirect
+	golang.org/x/sync v0.18.0 // indirect
 	golang.org/x/sys v0.37.0 // indirect
 	golang.org/x/term v0.36.0 // indirect
 	golang.org/x/text v0.30.0 // indirect
@@ -84,7 +86,6 @@ require (
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	k8s.io/apiextensions-apiserver v0.34.1 // indirect
-	k8s.io/klog/v2 v2.130.1 // indirect
 	k8s.io/kube-openapi v0.0.0-20250910181357-589584f1c912 // indirect
 	sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730 // indirect
 	sigs.k8s.io/randfill v1.0.0 // indirect
@@ -93,8 +94,26 @@ require (
 )
 
 // Local replacements for internal modules
+replace github.com/nvidia/nvsentinel/data-models => ../data-models
+
+replace github.com/nvidia/nvsentinel/statemanager => ../statemanager
+
+replace github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor => ../health-monitors/csp-health-monitor
+
+replace github.com/nvidia/nvsentinel/health-monitors/syslog-health-monitor => ../health-monitors/syslog-health-monitor
+
+replace github.com/nvidia/nvsentinel/platform-connectors => ../platform-connectors
+
 replace github.com/nvidia/nvsentinel/store-client => ../store-client
 
-replace github.com/nvidia/nvsentinel/data-models => ../data-models
+replace github.com/nvidia/nvsentinel/health-event-client => ../health-event-client
+
+replace github.com/nvidia/nvsentinel/health-events-analyzer => ../health-events-analyzer
+
+replace github.com/nvidia/nvsentinel/fault-quarantine => ../fault-quarantine
+
+replace github.com/nvidia/nvsentinel/labeler => ../labeler
+
+replace github.com/nvidia/nvsentinel/fault-remediation => ../fault-remediation
 
 replace github.com/nvidia/nvsentinel/commons => ../commons

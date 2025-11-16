@@ -31,6 +31,7 @@ import (
 	srv "github.com/nvidia/nvsentinel/commons/pkg/server"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/nvidia/nvsentinel/data-models/pkg/model"
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/config"
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/csp"
 	awsclient "github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/csp/aws"
@@ -38,7 +39,6 @@ import (
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/datastore"
 	eventpkg "github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/event"
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/metrics"
-	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/model"
 )
 
 const (

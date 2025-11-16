@@ -19,208 +19,139 @@ import (
 	"fmt"
 )
 
-// ErrorType represents different types of datastore errors
+// Common datastore errors
+var (
+	ErrConnectionFailed   = errors.New("datastore connection failed")
+	ErrInvalidConfig      = errors.New("invalid datastore configuration")
+	ErrOperationTimeout   = errors.New("datastore operation timeout")
+	ErrProviderNotFound   = errors.New("datastore provider not found")
+	ErrInvalidProvider    = errors.New("invalid datastore provider")
+	ErrRecordNotFound     = errors.New("record not found")
+	ErrInvalidData        = errors.New("invalid data format")
+	ErrTransactionFailed  = errors.New("transaction failed")
+	ErrChangeStreamFailed = errors.New("change stream operation failed")
+	ErrCertificateInvalid = errors.New("certificate validation failed")
+	ErrSSLConfigInvalid   = errors.New("SSL configuration invalid")
+)
+
+// ErrorType represents the category of error
 type ErrorType string
 
 const (
-	// Connection errors
-	ErrorTypeConnection     ErrorType = "connection"
-	ErrorTypeAuthentication ErrorType = "authentication"
-	ErrorTypeTimeout        ErrorType = "timeout"
-	ErrorTypeCertificate    ErrorType = "certificate"
-
-	// Operation errors
-	ErrorTypeQuery       ErrorType = "query"
-	ErrorTypeInsert      ErrorType = "insert"
-	ErrorTypeUpdate      ErrorType = "update"
-	ErrorTypeDelete      ErrorType = "delete"
-	ErrorTypeTransaction ErrorType = "transaction"
-
-	// Data errors
-	ErrorTypeDocumentNotFound ErrorType = "document_not_found"
-	ErrorTypeValidation       ErrorType = "validation"
-	ErrorTypeSerialization    ErrorType = "serialization"
-	ErrorTypeConversion       ErrorType = "conversion"
-
-	// Configuration errors
-	ErrorTypeConfiguration    ErrorType = "configuration"
-	ErrorTypeProviderNotFound ErrorType = "provider_not_found"
-	ErrorTypeInvalidProvider  ErrorType = "invalid_provider"
-
-	// Change stream errors
-	ErrorTypeChangeStream ErrorType = "change_stream"
-	ErrorTypeResumeToken  ErrorType = "resume_token"
-
-	// Unknown errors
-	ErrorTypeUnknown ErrorType = "unknown"
+	ErrorTypeConnection    ErrorType = "connection"
+	ErrorTypeConfiguration ErrorType = "configuration"
+	ErrorTypeOperation     ErrorType = "operation"
+	ErrorTypeValidation    ErrorType = "validation"
+	ErrorTypeCertificate   ErrorType = "certificate"
+	ErrorTypeTimeout       ErrorType = "timeout"
 )
 
-// DatastoreError represents a structured error from datastore operations
+// DatastoreError represents a structured datastore error
 type DatastoreError struct {
-	Type     ErrorType              `json:"type"`
-	Provider DataStoreProvider      `json:"provider"`
-	Message  string                 `json:"message"`
-	Cause    error                  `json:"-"` // Original error, not serialized
-	Metadata map[string]interface{} `json:"metadata,omitempty"`
+	Type     ErrorType
+	Provider string
+	Message  string
+	Cause    error
 }
 
-// Error implements the error interface
 func (e *DatastoreError) Error() string {
 	if e.Cause != nil {
-		return fmt.Sprintf("[%s:%s] %s: %v", e.Provider, e.Type, e.Message, e.Cause)
+		return fmt.Sprintf("%s error for %s provider: %s: %v", e.Type, e.Provider, e.Message, e.Cause)
 	}
 
-	return fmt.Sprintf("[%s:%s] %s", e.Provider, e.Type, e.Message)
+	return fmt.Sprintf("%s error for %s provider: %s", e.Type, e.Provider, e.Message)
 }
 
-// Unwrap returns the underlying error for error wrapping
 func (e *DatastoreError) Unwrap() error {
 	return e.Cause
 }
 
-// Is implements error comparison for errors.Is()
-func (e *DatastoreError) Is(target error) bool {
-	var datastoreErr *DatastoreError
-	if errors.As(target, &datastoreErr) {
-		return e.Type == datastoreErr.Type && e.Provider == datastoreErr.Provider
-	}
-
-	return false
-}
-
 // NewDatastoreError creates a new structured datastore error
-func NewDatastoreError(errorType ErrorType, provider DataStoreProvider, message string, cause error) *DatastoreError {
+func NewDatastoreError(errorType ErrorType, provider, message string, cause error) *DatastoreError {
 	return &DatastoreError{
 		Type:     errorType,
 		Provider: provider,
 		Message:  message,
 		Cause:    cause,
-		Metadata: make(map[string]interface{}),
 	}
 }
 
-// WithMetadata adds metadata to the error
-func (e *DatastoreError) WithMetadata(key string, value interface{}) *DatastoreError {
-	if e.Metadata == nil {
-		e.Metadata = make(map[string]interface{})
-	}
-
-	e.Metadata[key] = value
-
-	return e
+// WrapConnectionError wraps a connection error with provider context
+func WrapConnectionError(err error, provider string) error {
+	return NewDatastoreError(ErrorTypeConnection, provider, "failed to connect to datastore", err)
 }
 
-// IsConnectionError checks if the error is a connection-related error
+// WrapConfigurationError wraps a configuration error with provider context
+func WrapConfigurationError(err error, provider, message string) error {
+	return NewDatastoreError(ErrorTypeConfiguration, provider, message, err)
+}
+
+// WrapOperationError wraps an operation error with provider context
+func WrapOperationError(err error, provider, operation string) error {
+	return NewDatastoreError(ErrorTypeOperation, provider, fmt.Sprintf("%s operation failed", operation), err)
+}
+
+// WrapValidationError wraps a validation error with provider context
+func WrapValidationError(err error, provider, field string) error {
+	return NewDatastoreError(ErrorTypeValidation, provider, fmt.Sprintf("validation failed for field: %s", field), err)
+}
+
+// WrapCertificateError wraps a certificate error with provider context
+func WrapCertificateError(err error, provider, message string) error {
+	return NewDatastoreError(ErrorTypeCertificate, provider, message, err)
+}
+
+// WrapTimeoutError wraps a timeout error with provider context
+func WrapTimeoutError(err error, provider, operation string) error {
+	return NewDatastoreError(ErrorTypeTimeout, provider, fmt.Sprintf("%s operation timed out", operation), err)
+}
+
+// IsConnectionError checks if an error is a connection error
 func IsConnectionError(err error) bool {
-	var datastoreErr *DatastoreError
-	if errors.As(err, &datastoreErr) {
-		return datastoreErr.Type == ErrorTypeConnection ||
-			datastoreErr.Type == ErrorTypeAuthentication ||
-			datastoreErr.Type == ErrorTypeTimeout ||
-			datastoreErr.Type == ErrorTypeCertificate
+	var dsErr *DatastoreError
+	if errors.As(err, &dsErr) {
+		return dsErr.Type == ErrorTypeConnection
+	}
+
+	return errors.Is(err, ErrConnectionFailed)
+}
+
+// IsConfigurationError checks if an error is a configuration error
+func IsConfigurationError(err error) bool {
+	var dsErr *DatastoreError
+	if errors.As(err, &dsErr) {
+		return dsErr.Type == ErrorTypeConfiguration
+	}
+
+	return errors.Is(err, ErrInvalidConfig)
+}
+
+// IsValidationError checks if an error is a validation error
+func IsValidationError(err error) bool {
+	var dsErr *DatastoreError
+	if errors.As(err, &dsErr) {
+		return dsErr.Type == ErrorTypeValidation
 	}
 
 	return false
 }
 
-// IsRetryableError checks if the error should be retried
-func IsRetryableError(err error) bool {
-	var datastoreErr *DatastoreError
-	if errors.As(err, &datastoreErr) {
-		switch datastoreErr.Type {
-		case ErrorTypeConnection, ErrorTypeTimeout, ErrorTypeChangeStream:
-			return true
-		case ErrorTypeAuthentication, ErrorTypeCertificate, ErrorTypeQuery, ErrorTypeInsert,
-			ErrorTypeUpdate, ErrorTypeDelete, ErrorTypeTransaction, ErrorTypeDocumentNotFound,
-			ErrorTypeValidation, ErrorTypeSerialization, ErrorTypeConversion, ErrorTypeConfiguration,
-			ErrorTypeProviderNotFound, ErrorTypeInvalidProvider, ErrorTypeResumeToken, ErrorTypeUnknown:
-			return false
-		default:
-			return false
-		}
+// IsCertificateError checks if an error is a certificate error
+func IsCertificateError(err error) bool {
+	var dsErr *DatastoreError
+	if errors.As(err, &dsErr) {
+		return dsErr.Type == ErrorTypeCertificate
 	}
 
-	return false
+	return errors.Is(err, ErrCertificateInvalid)
 }
 
-// IsNotFoundError checks if the error indicates a document was not found
-func IsNotFoundError(err error) bool {
-	var datastoreErr *DatastoreError
-	if errors.As(err, &datastoreErr) {
-		return datastoreErr.Type == ErrorTypeDocumentNotFound
+// IsTimeoutError checks if an error is a timeout error
+func IsTimeoutError(err error) bool {
+	var dsErr *DatastoreError
+	if errors.As(err, &dsErr) {
+		return dsErr.Type == ErrorTypeTimeout
 	}
 
-	return false
-}
-
-// Error constructors for common error scenarios
-
-// NewConnectionError creates a connection error
-func NewConnectionError(provider DataStoreProvider, message string, cause error) *DatastoreError {
-	return NewDatastoreError(ErrorTypeConnection, provider, message, cause)
-}
-
-// NewAuthenticationError creates an authentication error
-func NewAuthenticationError(provider DataStoreProvider, message string, cause error) *DatastoreError {
-	return NewDatastoreError(ErrorTypeAuthentication, provider, message, cause)
-}
-
-// NewTimeoutError creates a timeout error
-func NewTimeoutError(provider DataStoreProvider, message string, cause error) *DatastoreError {
-	return NewDatastoreError(ErrorTypeTimeout, provider, message, cause)
-}
-
-// NewQueryError creates a query error
-func NewQueryError(provider DataStoreProvider, message string, cause error) *DatastoreError {
-	return NewDatastoreError(ErrorTypeQuery, provider, message, cause)
-}
-
-// NewInsertError creates an insert error
-func NewInsertError(provider DataStoreProvider, message string, cause error) *DatastoreError {
-	return NewDatastoreError(ErrorTypeInsert, provider, message, cause)
-}
-
-// NewUpdateError creates an update error
-func NewUpdateError(provider DataStoreProvider, message string, cause error) *DatastoreError {
-	return NewDatastoreError(ErrorTypeUpdate, provider, message, cause)
-}
-
-// NewDocumentNotFoundError creates a document not found error
-func NewDocumentNotFoundError(provider DataStoreProvider, message string, cause error) *DatastoreError {
-	return NewDatastoreError(ErrorTypeDocumentNotFound, provider, message, cause)
-}
-
-// NewValidationError creates a validation error
-func NewValidationError(provider DataStoreProvider, message string, cause error) *DatastoreError {
-	return NewDatastoreError(ErrorTypeValidation, provider, message, cause)
-}
-
-// NewConfigurationError creates a configuration error
-func NewConfigurationError(provider DataStoreProvider, message string, cause error) *DatastoreError {
-	return NewDatastoreError(ErrorTypeConfiguration, provider, message, cause)
-}
-
-// NewProviderNotFoundError creates a provider not found error
-func NewProviderNotFoundError(provider DataStoreProvider, message string, cause error) *DatastoreError {
-	return NewDatastoreError(ErrorTypeProviderNotFound, provider, message, cause)
-}
-
-// NewChangeStreamError creates a change stream error
-func NewChangeStreamError(provider DataStoreProvider, message string, cause error) *DatastoreError {
-	return NewDatastoreError(ErrorTypeChangeStream, provider, message, cause)
-}
-
-// NewSerializationError creates a serialization error
-func NewSerializationError(provider DataStoreProvider, message string, cause error) *DatastoreError {
-	return NewDatastoreError(ErrorTypeSerialization, provider, message, cause)
-}
-
-// NewTransactionError creates a transaction error
-func NewTransactionError(provider DataStoreProvider, message string, cause error) *DatastoreError {
-	return NewDatastoreError(ErrorTypeTransaction, provider, message, cause)
-}
-
-// NewUnknownError creates an unknown error
-func NewUnknownError(provider DataStoreProvider, message string, cause error) *DatastoreError {
-	return NewDatastoreError(ErrorTypeUnknown, provider, message, cause)
+	return errors.Is(err, ErrOperationTimeout)
 }

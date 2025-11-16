@@ -2,18 +2,20 @@ module github.com/nvidia/nvsentinel/store-client
 
 go 1.25
 
-toolchain go1.25.3
-
 require (
-	github.com/caarlos0/env/v11 v11.3.1
+	github.com/DATA-DOG/go-sqlmock v1.5.2
+	github.com/lib/pq v1.10.9
 	github.com/nvidia/nvsentinel/data-models v0.0.0
 	github.com/stretchr/testify v1.11.1
 	go.mongodb.org/mongo-driver v1.17.4
+	google.golang.org/protobuf v1.36.10
 	gopkg.in/yaml.v3 v3.0.1
+	k8s.io/klog/v2 v2.130.1
 )
 
 require (
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
+	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/golang/snappy v1.0.0 // indirect
 	github.com/klauspost/compress v1.18.0 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
@@ -34,11 +36,30 @@ require (
 	golang.org/x/text v0.30.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20251022142026-3a174f9686a8 // indirect
 	google.golang.org/grpc v1.76.0 // indirect
-	google.golang.org/protobuf v1.36.10 // indirect
 	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
 )
 
 // Local replacements for internal modules
 replace github.com/nvidia/nvsentinel/data-models => ../data-models
+
+replace github.com/nvidia/nvsentinel/statemanager => ../statemanager
+
+replace github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor => ../health-monitors/csp-health-monitor
+
+replace github.com/nvidia/nvsentinel/health-monitors/syslog-health-monitor => ../health-monitors/syslog-health-monitor
+
+replace github.com/nvidia/nvsentinel/platform-connectors => ../platform-connectors
+
+replace github.com/nvidia/nvsentinel/health-event-client => ../health-event-client
+
+replace github.com/nvidia/nvsentinel/health-events-analyzer => ../health-events-analyzer
+
+replace github.com/nvidia/nvsentinel/fault-quarantine => ../fault-quarantine
+
+replace github.com/nvidia/nvsentinel/labeler => ../labeler
+
+replace github.com/nvidia/nvsentinel/node-drainer => ../node-drainer
+
+replace github.com/nvidia/nvsentinel/fault-remediation => ../fault-remediation
 
 replace github.com/nvidia/nvsentinel/commons => ../commons

@@ -1,48 +1,80 @@
-# fault-remediation Makefile
+# Fault Remediation Module Makefile
+# Individual module build and test targets (requires private repo access and kubebuilder)
 
 # Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 # =============================================================================
 # MODULE-SPECIFIC CONFIGURATION
 # =============================================================================
 
+# Module type and capabilities
 IS_GO_MODULE := 1
-IS_KO_MODULE := 1
+HAS_DOCKER := 1
+
+# Fault-remediation specific settings
+CLEAN_EXTRA_FILES := faultremediation
+
+# Special kubebuilder setup for tests
+TEST_SETUP_COMMANDS := export PATH="$$GOPATH/bin:$$PATH" && \
+                      go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest && \
+                      export KUBEBUILDER_ASSETS=$$(setup-envtest use -p path 1.30.0) &&
+
+# Docker configuration
+DOCKER_EXTRA_ARGS :=
 
 # =============================================================================
-# INCLUDE SHARED DEFINITIONS
+# INCLUDE COMMON DEFINITIONS
 # =============================================================================
 
 include ../make/common.mk
 include ../make/go.mk
-
-# Test setup commands for kubebuilder envtest
-# Version is centrally managed in .versions.yaml
-TEST_SETUP_COMMANDS := \
-	go install sigs.k8s.io/controller-runtime/tools/setup-envtest@$(SETUP_ENVTEST_VERSION) && \
-	eval $$(setup-envtest use --use-env -p env) &&
+include ../make/docker.mk
 
 # =============================================================================
-# DEFAULT TARGET
+# LEGACY COMPATIBILITY
 # =============================================================================
 
-.PHONY: all
-all: lint-test
+# Legacy targets for backwards compatibility
+.PHONY: image publish
+image: docker-build
+publish: docker-publish
 
 # =============================================================================
 # MODULE HELP
 # =============================================================================
 
-.PHONY: help
 help:
-	@echo "fault-remediation Makefile - Using nvsentinel make/*.mk standards"
+	@echo "Fault Remediation Module Makefile - Using nvsentinel common.mk standards"
 	@echo ""
-	@echo "Main targets: all, lint-test, ci-test, build, test, lint, clean"
-	@echo "Ko targets: ko-build, ko-publish"
+	@echo "This module handles fault remediation and recovery operations."
 	@echo ""
-	@echo "Build notes:"
-	@echo "  - Container images are built using ko"
-	@echo "  - Use 'make ko-build' for local builds (KO_DOCKER_REPO=ko.local by default)"
-	@echo "  - Use 'make ko-publish' to build and push (set KO_DOCKER_REPO and VERSION)"
-	@echo "  - For Tilt development, see Tiltfile"
-
+	@echo "Configuration (environment variables):"
+	@echo "  MODULE_NAME=$(MODULE_NAME)"
+	@echo "  REPO_ROOT=$(REPO_ROOT)"
+	@echo "  GOPATH=$(GOPATH)"
+	@echo ""
+	@echo "Main targets:"
+	@echo "  all        - Run lint-test (standardized default)"
+	@echo "  lint-test  - Run full lint and test suite"
+	@echo ""
+	@echo "Individual targets:"
+	@echo "  vet, lint, test, coverage, build, binary"
+	@echo ""
+	@echo "Docker targets:"
+	@echo "  docker-build, docker-publish, image, publish"
+	@echo ""
+	@echo "Module-specific notes:"
+	@echo "  - Requires kubebuilder setup-envtest for testing"
+	@echo "  - Uses standardized repo-root Docker build context"

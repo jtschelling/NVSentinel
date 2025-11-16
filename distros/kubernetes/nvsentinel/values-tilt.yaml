@@ -16,6 +16,24 @@ global:
   dryRun: false
   kubeVersion: 1.31.0
 
+  # Keep legacy resource naming for Tilt compatibility
+  # Tiltfile expects "platform-connectors" resource name
+  useLegacyResourceNames: true
+
+  # Datastore provider configuration (for database abstraction)
+  # Default to MongoDB for Tilt development (use USE_POSTGRESQL=1 for PostgreSQL)
+  datastore:
+    provider: "mongodb"
+    connection:
+      host: "mongodb"
+      port: 27017
+      database: "nvsentinel"
+    options:
+      maxConnections: "25"
+      maxIdleConnections: "10"
+      connectionMaxLifetime: "1h"
+      pollInterval: "5s"
+
   nodeSelector: {}
   
   tolerations: 

@@ -18,6 +18,22 @@ global:
     tag: "main"
   metricsPort: 2112
 
+  # Backward compatibility for resource naming
+  # Set to false for new deployments to use release name
+  # Keep true for existing deployments to avoid breaking changes
+  # Default: true (maintains backward compatibility)
+  useLegacyResourceNames: true
+
+  # Datastore configuration
+  # By default, datastore is not configured (use mongodb-config ConfigMap directly)
+  # To use the centralized datastore configuration, uncomment and configure below
+  # datastore:
+  #   provider: "mongodb"  # or "postgresql"
+  #   connection:
+  #     host: "mongodb"
+  #     port: 27017
+  #     database: "nvsentinel"
+
   # Shared metadata path used by metadata-collector and syslog-health-monitor
   metadataPath: /var/lib/nvsentinel/gpu_metadata.json
 
@@ -73,6 +89,12 @@ platformConnector:
 
   tolerations: []
 
+  logLevel: info
+
+  mongodbStore:
+    enabled: false
+    clientCertMountPath: "/etc/ssl/mongo-client"
+
   k8sConnector:
     enabled: true
     qps: 5.0
@@ -125,3 +147,9 @@ nodeConditionCleanup:
     requests:
       cpu: 50m
       memory: 64Mi
+
+# PostgreSQL subchart configuration
+# Only enabled when using PostgreSQL as the datastore
+# See values-postgresql.yaml for a complete PostgreSQL configuration example
+postgresql:
+  enabled: false

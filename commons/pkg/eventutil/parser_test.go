@@ -18,7 +18,6 @@ import (
 	"testing"
 
 	"github.com/nvidia/nvsentinel/data-models/pkg/model"
-	"github.com/nvidia/nvsentinel/store-client/pkg/datastore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -28,13 +27,13 @@ func TestParseHealthEventFromEvent(t *testing.T) {
 
 	tests := []struct {
 		name        string
-		event       datastore.Event
+		event       map[string]interface{}
 		expectError bool
 		checkResult func(*testing.T, model.HealthEventWithStatus)
 	}{
 		{
 			name: "parse change stream event with fullDocument",
-			event: datastore.Event{
+			event: map[string]interface{}{
 				"operationType": "insert",
 				"fullDocument": map[string]interface{}{
 					"healtheventstatus": map[string]interface{}{
@@ -56,7 +55,7 @@ func TestParseHealthEventFromEvent(t *testing.T) {
 		},
 		{
 			name: "parse direct document event",
-			event: datastore.Event{
+			event: map[string]interface{}{
 				"healtheventstatus": map[string]interface{}{
 					"nodequarantined": "Quarantined",
 				},
@@ -75,7 +74,7 @@ func TestParseHealthEventFromEvent(t *testing.T) {
 		},
 		{
 			name: "error on nil health event",
-			event: datastore.Event{
+			event: map[string]interface{}{
 				"healtheventstatus": map[string]interface{}{
 					"nodequarantined": "Quarantined",
 				},

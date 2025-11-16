@@ -19,19 +19,19 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
-	"strconv"
 
 	"github.com/nvidia/nvsentinel/commons/pkg/logger"
-	"github.com/nvidia/nvsentinel/commons/pkg/server"
-	protos "github.com/nvidia/nvsentinel/data-models/pkg/protos"
+	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	config "github.com/nvidia/nvsentinel/health-events-analyzer/pkg/config"
 	"github.com/nvidia/nvsentinel/health-events-analyzer/pkg/publisher"
 	"github.com/nvidia/nvsentinel/health-events-analyzer/pkg/reconciler"
-	"github.com/nvidia/nvsentinel/store-client/pkg/client"
+	sdkconfig "github.com/nvidia/nvsentinel/store-client/pkg/config"
 	"github.com/nvidia/nvsentinel/store-client/pkg/datastore"
 	_ "github.com/nvidia/nvsentinel/store-client/pkg/datastore/providers"
-	"golang.org/x/sync/errgroup"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -53,44 +53,25 @@ func main() {
 	}
 }
 
-// getCertPath checks if the certificate exists at the new path, falls back to legacy path
-func getCertPath(databaseClientCertMountPath string) string {
-	// Check if ca.crt exists at the new path
-	if _, err := os.Stat(databaseClientCertMountPath + "/ca.crt"); err == nil {
-		return databaseClientCertMountPath
-	}
-
-	// Fall back to legacy mongo-client path
-	legacyPath := "/etc/ssl/mongo-client"
-	if _, err := os.Stat(legacyPath + "/ca.crt"); err == nil {
-		slog.Info("Using legacy certificate path for backward compatibility", "path", legacyPath)
-		return legacyPath
-	}
-
-	// If neither exists, return the new path (original behavior)
-	return databaseClientCertMountPath
-}
-
-func loadDatabaseConfig(databaseClientCertMountPath string) (*datastore.DataStoreConfig, error) {
-	// Load using the new unified datastore configuration
-	config, err := datastore.LoadDatastoreConfig()
+func loadDatastoreConfig(ctx context.Context) (datastore.DataStore, *datastore.DataStoreConfig, error) {
+	// Load datastore configuration using the abstraction layer
+	datastoreConfig, err := sdkconfig.LoadDatastoreConfig()
 	if err != nil {
-		return nil, fmt.Errorf("failed to load datastore config: %w", err)
+		return nil, nil, fmt.Errorf("failed to load datastore configuration: %w", err)
 	}
 
-	// Override SSL cert path if provided via command line
-	if databaseClientCertMountPath != "" && config.Connection.SSLCert == "" {
-		certPath := getCertPath(databaseClientCertMountPath)
-		config.Connection.SSLCert = certPath + "/tls.crt"
-		config.Connection.SSLKey = certPath + "/tls.key"
-		config.Connection.SSLRootCert = certPath + "/ca.crt"
+	// Create datastore instance
+	dataStore, err := datastore.NewDataStore(ctx, *datastoreConfig)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create datastore: %w", err)
 	}
 
-	return config, nil
-}
+	// Test datastore connection
+	if err := dataStore.Ping(ctx); err != nil {
+		return nil, nil, fmt.Errorf("failed to ping datastore: %w", err)
+	}
 
-func createPipeline() interface{} {
-	return client.BuildNonFatalUnhealthyInsertsPipeline()
+	return dataStore, datastoreConfig, nil
 }
 
 func connectToPlatform(socket string) (*publisher.PublisherConfig, *grpc.ClientConn, error) {
@@ -101,10 +82,41 @@ func connectToPlatform(socket string) (*publisher.PublisherConfig, *grpc.ClientC
 		return nil, nil, fmt.Errorf("failed to dial platform connector UDS %s: %w", socket, err)
 	}
 
-	platformConnectorClient := protos.NewPlatformConnectorClient(conn)
+	platformConnectorClient := pb.NewPlatformConnectorClient(conn)
 	pub := publisher.NewPublisher(platformConnectorClient)
 
 	return pub, conn, nil
+}
+
+func createPipeline() datastore.Pipeline {
+	return datastore.Pipeline{
+		datastore.D(
+			datastore.E("$match", datastore.D(
+				datastore.E("operationType", "insert"),
+				datastore.E("fullDocument.healthevent.isfatal", false),
+				datastore.E("fullDocument.healthevent.ishealthy", false),
+			)),
+		),
+	}
+}
+
+func startMetricsServer(metricsPort string) {
+	go func() {
+		http.Handle("/metrics", promhttp.Handler())
+		http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("ok"))
+		})
+		slog.Info("Starting metrics server", "port", metricsPort)
+		//nolint:gosec // G114: Ignoring the use of http.ListenAndServe without timeouts
+		err := http.ListenAndServe(":"+metricsPort, nil)
+		if err != nil {
+			slog.Error("Failed to start metrics server", "error", err)
+			os.Exit(1)
+		}
+	}()
+
+	slog.Info("Metrics server goroutine started")
 }
 
 func run() error {
@@ -112,16 +124,21 @@ func run() error {
 
 	metricsPort := flag.String("metrics-port", "2112", "port to expose Prometheus metrics on")
 	socket := flag.String("socket", "unix:///var/run/nvsentinel.sock", "unix domain socket")
-	tomlConfigPath := flag.String("config-path", "/etc/config/config.toml", "path to TOML config file")
-	databaseClientCertMountPath := flag.String("database-client-cert-mount-path", "/etc/ssl/database-client",
-		"path where the database client cert is mounted")
 
 	flag.Parse()
 
-	databaseConfig, err := loadDatabaseConfig(*databaseClientCertMountPath)
+	dataStore, datastoreConfig, err := loadDatastoreConfig(ctx)
 	if err != nil {
 		return err
 	}
+
+	defer func() {
+		if err := dataStore.Close(ctx); err != nil {
+			slog.Error("Failed to close datastore", "error", err)
+		}
+	}()
+
+	slog.Info("Successfully connected to datastore", "provider", datastoreConfig.Provider)
 
 	pipeline := createPipeline()
 
@@ -132,52 +149,36 @@ func run() error {
 	defer conn.Close()
 
 	// Parse the TOML content
-	tomlConfig, err := config.LoadTomlConfig(*tomlConfigPath)
+	tomlConfig, err := config.LoadTomlConfig("/etc/config/config.toml")
 	if err != nil {
 		return fmt.Errorf("error loading TOML config: %w", err)
 	}
 
+	// Get collection name from environment (with defaults)
+	collection := getEnvWithDefault("DATASTORE_COLLECTION_NAME", "HealthEvents")
+
 	reconcilerCfg := reconciler.HealthEventsAnalyzerReconcilerConfig{
-		DataStoreConfig:           databaseConfig,
-		Pipeline:                  pipeline,
+		DataStore:                 dataStore, // Use new datastore abstraction
+		Pipeline:                  pipeline,  // Use new pipeline types
 		HealthEventsAnalyzerRules: tomlConfig,
 		Publisher:                 pub,
+		CollectionName:            collection,
 	}
 
 	rec := reconciler.NewReconciler(reconcilerCfg)
 
-	// Parse the metrics port
-	portInt, err := strconv.Atoi(*metricsPort)
-	if err != nil {
-		return fmt.Errorf("invalid metrics port: %w", err)
+	startMetricsServer(*metricsPort)
+
+	rec.Start(ctx)
+
+	return nil
+}
+
+// getEnvWithDefault returns the environment variable value or a default if not set
+func getEnvWithDefault(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
 	}
 
-	// Create the server
-	srv := server.NewServer(
-		server.WithPort(portInt),
-		server.WithPrometheusMetrics(),
-		server.WithSimpleHealth(),
-	)
-
-	// Start server and reconciler concurrently
-	g, gCtx := errgroup.WithContext(ctx)
-
-	// Start the metrics/health server.
-	// Metrics server failures are logged but do NOT terminate the service.
-	g.Go(func() error {
-		slog.Info("Starting metrics server", "port", portInt)
-
-		if err := srv.Serve(gCtx); err != nil {
-			slog.Error("Metrics server failed - continuing without metrics", "error", err)
-		}
-
-		return nil
-	})
-
-	g.Go(func() error {
-		return rec.Start(gCtx)
-	})
-
-	// Wait for both goroutines to finish
-	return g.Wait()
+	return defaultValue
 }

@@ -14,6 +14,10 @@
 
 package config
 
+import (
+	"github.com/BurntSushi/toml"
+)
+
 type Rule struct {
 	Kind       string `toml:"kind"`
 	Expression string `toml:"expression"`
@@ -27,11 +31,6 @@ type Taint struct {
 
 type Cordon struct {
 	ShouldCordon bool `toml:"shouldCordon"`
-}
-
-type CircuitBreaker struct {
-	Percentage int    `toml:"percentage"`
-	Duration   string `toml:"duration"`
 }
 
 type Match struct {
@@ -49,7 +48,15 @@ type RuleSet struct {
 }
 
 type TomlConfig struct {
-	LabelPrefix    string         `toml:"label-prefix"`
-	CircuitBreaker CircuitBreaker `toml:"circuitBreaker"`
-	RuleSets       []RuleSet      `toml:"rule-sets"`
+	LabelPrefix string    `toml:"label-prefix"`
+	RuleSets    []RuleSet `toml:"rule-sets"`
+}
+
+func LoadTomlConfig(path string) (*TomlConfig, error) {
+	var config TomlConfig
+	if _, err := toml.DecodeFile(path, &config); err != nil {
+		return nil, err
+	}
+
+	return &config, nil
 }

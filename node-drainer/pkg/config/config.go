@@ -20,9 +20,6 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
-	"github.com/nvidia/nvsentinel/commons/pkg/statemanager"
-	"github.com/nvidia/nvsentinel/store-client/pkg/client"
-	"github.com/nvidia/nvsentinel/store-client/pkg/config"
 )
 
 type EvictMode string
@@ -89,12 +86,21 @@ func LoadTomlConfigFromString(configString string) (*TomlConfig, error) {
 }
 
 func validateAndSetDefaults(config *TomlConfig) (*TomlConfig, error) {
+	if err := validateTimeoutDefaults(config); err != nil {
+		return nil, err
+	}
+
+	return config, nil
+}
+
+// validateTimeoutDefaults validates timeout-related configuration
+func validateTimeoutDefaults(config *TomlConfig) error {
 	if config.DeleteAfterTimeoutMinutes == 0 {
 		config.DeleteAfterTimeoutMinutes = 60 // Default: 60 minutes
 	}
 
 	if config.DeleteAfterTimeoutMinutes <= 0 {
-		return nil, fmt.Errorf("deleteAfterTimeout must be a positive integer")
+		return fmt.Errorf("deleteAfterTimeout must be a positive integer")
 	}
 
 	if config.NotReadyTimeoutMinutes == 0 {
@@ -102,88 +108,8 @@ func validateAndSetDefaults(config *TomlConfig) (*TomlConfig, error) {
 	}
 
 	if config.NotReadyTimeoutMinutes <= 0 {
-		return nil, fmt.Errorf("notReadyTimeoutMinutes must be a positive integer")
+		return fmt.Errorf("notReadyTimeoutMinutes must be a positive integer")
 	}
 
-	return config, nil
-}
-
-type ReconcilerConfig struct {
-	TomlConfig     TomlConfig
-	DatabaseConfig config.DatabaseConfig
-	TokenConfig    client.TokenConfig
-	StateManager   statemanager.StateManager
-}
-
-// EnvConfig holds configuration loaded from environment variables
-type EnvConfig struct {
-	DatabaseURI               string
-	DatabaseName              string
-	DatabaseCollection        string
-	TokenDatabase             string
-	TokenCollection           string
-	TotalTimeoutSeconds       int
-	IntervalSeconds           int
-	TotalCACertTimeoutSeconds int
-	IntervalCACertSeconds     int
-}
-
-// LoadEnvConfig loads and validates environment variable configuration using centralized store-client
-func LoadEnvConfig() (*EnvConfig, error) {
-	// Use centralized configuration from store-client
-	databaseConfig, err := config.NewDatabaseConfigFromEnv()
-	if err != nil {
-		return nil, fmt.Errorf("failed to load database configuration: %w", err)
-	}
-
-	// Load token configuration using centralized function
-	tokenConfig, err := config.TokenConfigFromEnv("node-drainer")
-	if err != nil {
-		return nil, fmt.Errorf("failed to load token configuration: %w", err)
-	}
-
-	// Get timeout configuration
-	timeoutConfig := databaseConfig.GetTimeoutConfig()
-
-	return &EnvConfig{
-		DatabaseURI:               databaseConfig.GetConnectionURI(),
-		DatabaseName:              databaseConfig.GetDatabaseName(),
-		DatabaseCollection:        databaseConfig.GetCollectionName(),
-		TokenDatabase:             tokenConfig.TokenDatabase,
-		TokenCollection:           tokenConfig.TokenCollection,
-		TotalTimeoutSeconds:       timeoutConfig.GetPingTimeoutSeconds(),
-		IntervalSeconds:           timeoutConfig.GetPingIntervalSeconds(),
-		TotalCACertTimeoutSeconds: timeoutConfig.GetCACertTimeoutSeconds(),
-		IntervalCACertSeconds:     timeoutConfig.GetCACertIntervalSeconds(),
-	}, nil
-}
-
-// NewDatabaseConfig creates a database configuration from environment config and certificate paths
-func NewDatabaseConfig(databaseClientCertMountPath string) (config.DatabaseConfig, error) {
-	if databaseClientCertMountPath != "" {
-		return config.NewDatabaseConfigFromEnvWithDefaults(databaseClientCertMountPath)
-	}
-
-	return config.NewDatabaseConfigFromEnv()
-}
-
-// NewTokenConfig is DEPRECATED and should not be used.
-// This function hardcoded ClientName="node-draining-module", which caused resume token
-// lookup failures because LoadEnvConfig uses ClientName="node-drainer".
-// Instead, use config.TokenConfigFromEnv("node-drainer") directly like other modules.
-//
-// Deprecated: Use config.TokenConfigFromEnv("node-drainer") instead.
-func NewTokenConfig(envConfig *EnvConfig) client.TokenConfig {
-	// Return config with the CORRECT ClientName to match what's used for token storage
-	return client.TokenConfig{
-		ClientName:      "node-drainer", // Fixed: was "node-draining-module"
-		TokenDatabase:   envConfig.TokenDatabase,
-		TokenCollection: envConfig.TokenCollection,
-	}
-}
-
-// NewQuarantinePipeline creates the database change stream pipeline for watching quarantine events
-// This consolidates pipeline creation using the centralized store-client
-func NewQuarantinePipeline() interface{} {
-	return client.BuildNodeQuarantineStatusUpdatesPipeline()
+	return nil
 }

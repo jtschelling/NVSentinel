@@ -25,6 +25,10 @@ dependencies:
   - name: mongodb-store
     version: "0.1.0"
     condition: global.mongodbStore.enabled
+  - name: postgresql
+    version: "15.5.38"
+    repository: oci://registry-1.docker.io/bitnamicharts
+    condition: postgresql.enabled
   - name: fault-quarantine
     version: "0.1.0"
     condition: global.faultQuarantine.enabled

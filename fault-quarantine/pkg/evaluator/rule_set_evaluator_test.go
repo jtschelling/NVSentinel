@@ -20,9 +20,10 @@ import (
 	"testing"
 
 	multierror "github.com/hashicorp/go-multierror"
-	"github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/fault-quarantine/pkg/common"
 	"github.com/nvidia/nvsentinel/fault-quarantine/pkg/config"
+	"github.com/nvidia/nvsentinel/data-models/pkg/protos"
+	"k8s.io/client-go/kubernetes/fake"
 )
 
 type MockRuleEvaluator struct {
@@ -72,7 +73,7 @@ func TestAnyRuleSetEvaluator_Evaluate(t *testing.T) {
 				&MockRuleEvaluator{result: false, err: errors.New("evaluation error")},
 			},
 			event:     &protos.HealthEvent{},
-			expected:  common.RuleEvaluationFailed,
+			expected:  common.RuleEvaluationErroredOut,
 			expectErr: true,
 		},
 		{
@@ -92,7 +93,7 @@ func TestAnyRuleSetEvaluator_Evaluate(t *testing.T) {
 				&MockRuleEvaluator{result: false, err: errors.New("error 2")},
 			},
 			event:     &protos.HealthEvent{},
-			expected:  common.RuleEvaluationFailed,
+			expected:  common.RuleEvaluationErroredOut,
 			expectErr: true,
 		},
 	}
@@ -288,9 +289,11 @@ func TestInitializeRuleSetEvaluators(t *testing.T) {
 		},
 	}
 
+	clientset := fake.NewSimpleClientset()
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			evaluators, err := InitializeRuleSetEvaluators(tt.ruleSets, nil)
+			evaluators, err := InitializeRuleSetEvaluators(tt.ruleSets, clientset, nil)
 			if len(evaluators) != tt.expectedCount {
 				t.Errorf("Expected %d evaluators, got %d", tt.expectedCount, len(evaluators))
 			}
@@ -362,9 +365,10 @@ func TestCreateEvaluators(t *testing.T) {
 		},
 	}
 
+	clientset := fake.NewSimpleClientset()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			evaluators, err := createEvaluators(tt.rules, nil)
+			evaluators, err := createEvaluators(tt.rules, clientset, nil)
 			if len(evaluators) != tt.expectedCount {
 				t.Errorf("Expected %d evaluators, got %d", tt.expectedCount, len(evaluators))
 			}

@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package providers imports all datastore providers to ensure they register themselves
 package providers
 
-// Import all providers to ensure they are registered
 import (
+	// Import all providers to ensure their init() functions run and register themselves
 	_ "github.com/nvidia/nvsentinel/store-client/pkg/datastore/providers/mongodb"
-	// Additional providers can be added here
-	// _ "github.com/nvidia/nvsentinel/store-client/pkg/datastore/providers/postgresql"
+	_ "github.com/nvidia/nvsentinel/store-client/pkg/datastore/providers/postgresql"
 )

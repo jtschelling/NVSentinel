@@ -19,13 +19,12 @@ import (
 	"fmt"
 
 	"github.com/nvidia/nvsentinel/data-models/pkg/model"
-	"github.com/nvidia/nvsentinel/store-client/pkg/datastore"
 )
 
 // ParseHealthEventFromEvent extracts and parses a health event from a database event.
 // It handles both change stream events (with fullDocument) and direct document events.
 // This is a shared utility used by multiple reconcilers (fault-remediation, node-drainer, etc.)
-func ParseHealthEventFromEvent(event datastore.Event) (model.HealthEventWithStatus, error) {
+func ParseHealthEventFromEvent(event map[string]interface{}) (model.HealthEventWithStatus, error) {
 	var healthEventWithStatus model.HealthEventWithStatus
 
 	// Determine what to unmarshal: check if this is a change stream event with fullDocument

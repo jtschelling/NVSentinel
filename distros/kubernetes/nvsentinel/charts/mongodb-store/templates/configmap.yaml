@@ -17,6 +17,9 @@ kind: ConfigMap
 metadata:
   name: mongodb-config
 data:
+  # Datastore provider configuration for new abstraction layer
+  DATASTORE_PROVIDER: "mongodb"
+  # Legacy MongoDB configuration (maintained for backward compatibility)
   MONGODB_URI: {{ printf "mongodb://mongodb-headless.%s.svc.cluster.local:27017/?replicaSet=rs0&tls=true" .Release.Namespace }}
   MONGODB_DATABASE_NAME: "HealthEventsDatabase"
   MONGODB_COLLECTION_NAME: "HealthEvents"
@@ -30,3 +33,4 @@ data:
   MONGODB_CHANGE_STREAM_RETRY_INTERVAL_SECONDS: "5"
   UNPROCESSED_EVENTS_METRIC_UPDATE_INTERVAL_SECONDS: "25"
   MONGODB_COLLECTION_EXPIRY_SECONDS: "2592000"
+  MONGODB_CLIENT_CERT_MOUNT_PATH: "/etc/ssl/mongo-client"
