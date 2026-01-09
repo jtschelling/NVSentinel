@@ -55,6 +55,23 @@ CAPACITY_RESERVATION_ID="${CAPACITY_RESERVATION_ID:-}"
 NVSENTINEL_VERSION="${NVSENTINEL_VERSION:-}"
 NVSENTINEL_TAG="${NVSENTINEL_TAG:-main}"
 
+# Local build configuration (USE_LOCAL_BUILD=true to build images locally and push to registry)
+USE_LOCAL_BUILD="${USE_LOCAL_BUILD:-false}"
+
+# AWS ECR configuration (for USE_LOCAL_BUILD with CSP=aws)
+ECR_REPO_PREFIX="${ECR_REPO_PREFIX:-nvsentinel-uat}"
+ECR_VALUES_FILE="${ECR_VALUES_FILE:-/tmp/nvsentinel-ecr-values.yaml}"
+ECR_REGISTRY=""  # Set by setup_ecr_and_build()
+
+# GCP Artifact Registry configuration (for USE_LOCAL_BUILD with CSP=gcp)
+GCP_PROJECT_ID="${GCP_PROJECT_ID:-}"
+GCP_REGION="${GCP_REGION:-us-central1}"
+GCP_ZONE="${GCP_ZONE:-}"
+GCP_SERVICE_ACCOUNT="${GCP_SERVICE_ACCOUNT:-}"
+GAR_REPO_NAME="${GAR_REPO_NAME:-nvsentinel-uat}"
+GAR_VALUES_FILE="${GAR_VALUES_FILE:-/tmp/nvsentinel-gar-values.yaml}"
+GAR_REGISTRY=""  # Set by setup_gar_and_build()
+
 DELETE_CLUSTER_ON_EXIT="${DELETE_CLUSTER_ON_EXIT:-false}"
 
 cleanup() {
@@ -74,6 +91,13 @@ cleanup() {
         export CLUSTER_NAME
         export AWS_REGION
         
+        # GCP-specific exports for cleanup
+        if [[ "$CSP" == "gcp" ]]; then
+            export TF_VAR_project_id="${GCP_PROJECT_ID}"
+            export TF_VAR_deployment_id
+            export TF_VAR_zone="${GCP_ZONE}"
+        fi
+        
         # Get the cluster deletion script for this CSP
         local delete_script
         delete_script=$(get_cluster_script "delete")
@@ -81,6 +105,21 @@ cleanup() {
         cd "${SCRIPT_DIR}/${CSP}"
         "./${delete_script}" || log "WARNING: Cluster deletion failed"
         cd "$original_dir"
+        
+        # Clean up container registry if using local build
+        if [[ "$USE_LOCAL_BUILD" == "true" ]]; then
+            if [[ "$CSP" == "aws" ]]; then
+                log "Cleaning up ECR repositories..."
+                export ECR_REPO_PREFIX
+                "${SCRIPT_DIR}/${CSP}/delete-ecr-repos.sh" || log "WARNING: ECR cleanup failed"
+            elif [[ "$CSP" == "gcp" ]]; then
+                log "Cleaning up GAR repository..."
+                export GCP_PROJECT_ID
+                export GCP_REGION
+                export GAR_REPO_NAME
+                "${SCRIPT_DIR}/${CSP}/delete-gar-repos.sh" || log "WARNING: GAR cleanup failed"
+            fi
+        fi
         
         log "Cluster cleanup completed"
     fi
@@ -121,8 +160,62 @@ check_prerequisites() {
         fi
     fi
     
-    if [[ -z "$NVSENTINEL_VERSION" ]]; then
-        error "NVSENTINEL_VERSION is required. Set it via environment variable: export NVSENTINEL_VERSION='v0.1.0'"
+    if [[ "$CSP" == "gcp" ]]; then
+        if ! command -v gcloud &> /dev/null; then
+            error "gcloud CLI is not installed. Install from: https://cloud.google.com/sdk/docs/install"
+        fi
+        
+        if ! command -v terraform &> /dev/null; then
+            error "terraform is not installed. Install from: https://www.terraform.io/downloads"
+        fi
+        
+        if ! gcloud auth print-access-token &> /dev/null; then
+            error "gcloud is not authenticated. Run 'gcloud auth login' or configure service account."
+        fi
+        
+        if [[ -z "$GCP_PROJECT_ID" ]]; then
+            error "GCP_PROJECT_ID is required for GCP. Set it via environment variable."
+        fi
+        
+        if [[ -z "$GCP_ZONE" ]]; then
+            error "GCP_ZONE is required for GCP. Set it via environment variable."
+        fi
+    fi
+    
+    # Check for USE_LOCAL_BUILD prerequisites
+    if [[ "$USE_LOCAL_BUILD" == "true" ]]; then
+        if [[ "$CSP" != "aws" ]] && [[ "$CSP" != "gcp" ]]; then
+            error "USE_LOCAL_BUILD is currently only supported for CSP=aws or CSP=gcp"
+        fi
+        
+        if ! command -v ko &> /dev/null; then
+            error "ko is required for USE_LOCAL_BUILD but not installed. Install from: https://ko.build/install/"
+        fi
+        
+        if ! command -v docker &> /dev/null; then
+            error "docker is required for USE_LOCAL_BUILD but not installed"
+        fi
+        
+        # GCP-specific checks
+        if [[ "$CSP" == "gcp" ]]; then
+            if ! command -v gcloud &> /dev/null; then
+                error "gcloud CLI is required for USE_LOCAL_BUILD on GCP. Install from: https://cloud.google.com/sdk/docs/install"
+            fi
+            
+            if [[ -z "$GCP_PROJECT_ID" ]]; then
+                error "GCP_PROJECT_ID is required for USE_LOCAL_BUILD on GCP"
+            fi
+            
+            if ! gcloud auth print-access-token &> /dev/null; then
+                error "gcloud is not authenticated. Run 'gcloud auth login' or configure service account."
+            fi
+            
+            log "Using local build mode - images will be built and pushed to GAR"
+        else
+            log "Using local build mode - images will be built and pushed to ECR"
+        fi
+    elif [[ -z "$NVSENTINEL_VERSION" ]]; then
+        error "NVSENTINEL_VERSION is required. Set it via environment variable: export NVSENTINEL_VERSION='v0.1.0' or use USE_LOCAL_BUILD=true"
     fi
     
     local values_dir="${SCRIPT_DIR}/${CSP}"
@@ -168,18 +261,95 @@ get_cluster_script() {
                 echo "delete-eks-cluster.sh"
             fi
             ;;
-        azure|gcp|oci)
-            error "CSP '$CSP' cluster $operation not yet implemented. Please manage cluster manually or use CSP=aws or CSP=kind"
+        gcp)
+            if [[ "$operation" == "create" ]]; then
+                echo "create-gke-cluster.sh"
+            else
+                echo "delete-gke-cluster.sh"
+            fi
+            ;;
+        azure|oci)
+            error "CSP '$CSP' cluster $operation not yet implemented. Please manage cluster manually or use CSP=aws, CSP=gcp, or CSP=kind"
             ;;
         *)
-            error "Unknown CSP: $CSP. Supported values: kind, aws, azure, gcp, oci"
+            error "Unknown CSP: $CSP. Supported values: kind, aws, gcp, azure, oci"
             ;;
     esac
 }
 
+# Set up ECR and build images locally (for USE_LOCAL_BUILD mode on AWS)
+setup_ecr_and_build() {
+    log "========================================="
+    log "Setting up ECR and building images..."
+    log "========================================="
+    
+    export AWS_REGION
+    export ECR_REPO_PREFIX
+    export ECR_VALUES_FILE
+    
+    # Create ECR repositories and capture the registry URL
+    log "Creating ECR repositories..."
+    ECR_REGISTRY=$("${SCRIPT_DIR}/${CSP}/create-ecr-repos.sh")
+    export ECR_REGISTRY
+    
+    log "ECR Registry: $ECR_REGISTRY"
+    
+    # Build and push images
+    log "Building and pushing images to ECR..."
+    "${SCRIPT_DIR}/${CSP}/build-push-images.sh"
+    
+    # Set NVSENTINEL_VERSION to the git SHA used for image tags
+    NVSENTINEL_VERSION=$(git -C "$REPO_ROOT" rev-parse --short HEAD)
+    export NVSENTINEL_VERSION
+    
+    log "ECR setup and image build complete ✓"
+    log "Image Tag: $NVSENTINEL_VERSION"
+    log "ECR Values File: $ECR_VALUES_FILE"
+}
+
+# Set up GAR and build images locally (for USE_LOCAL_BUILD mode on GCP)
+setup_gar_and_build() {
+    log "========================================="
+    log "Setting up GAR and building images..."
+    log "========================================="
+    
+    export GCP_PROJECT_ID
+    export GCP_REGION
+    export GAR_REPO_NAME
+    export GAR_VALUES_FILE
+    
+    # Create GAR repository and capture the registry URL
+    log "Creating Artifact Registry repository..."
+    GAR_REGISTRY=$("${SCRIPT_DIR}/${CSP}/create-gar-repos.sh")
+    export GAR_REGISTRY
+    
+    log "GAR Registry: $GAR_REGISTRY"
+    
+    # Set up workload identity for janitor-provider
+    log "Setting up Workload Identity for janitor-provider..."
+    GCP_SERVICE_ACCOUNT=$("${SCRIPT_DIR}/${CSP}/setup-workload-identity.sh")
+    export GCP_SERVICE_ACCOUNT
+    
+    # Build and push images
+    log "Building and pushing images to GAR..."
+    "${SCRIPT_DIR}/${CSP}/build-push-images.sh"
+    
+    # Set NVSENTINEL_VERSION to the git SHA used for image tags
+    NVSENTINEL_VERSION=$(git -C "$REPO_ROOT" rev-parse --short HEAD)
+    export NVSENTINEL_VERSION
+    
+    # Export the GAR values file path as ECR_VALUES_FILE for install-apps.sh compatibility
+    ECR_VALUES_FILE="$GAR_VALUES_FILE"
+    export ECR_VALUES_FILE
+    
+    log "GAR setup and image build complete ✓"
+    log "Image Tag: $NVSENTINEL_VERSION"
+    log "GAR Values File: $GAR_VALUES_FILE"
+}
+
 create_cluster() {
     log "========================================="
-    log "Creating ${CSP^^} cluster..."
+    log "Creating ${CSP} cluster..."
     log "========================================="
     
     # Kind clusters are assumed to be created externally
@@ -203,14 +373,31 @@ create_cluster() {
     
     # For cloud CSPs, run the cluster creation script
     export CLUSTER_NAME
-    export AWS_REGION
-    export K8S_VERSION
-    export GPU_AVAILABILITY_ZONE
-    export CPU_NODE_TYPE
-    export CPU_NODE_COUNT
-    export GPU_NODE_TYPE
-    export GPU_NODE_COUNT
-    export CAPACITY_RESERVATION_ID
+    
+    # AWS-specific exports
+    if [[ "$CSP" == "aws" ]]; then
+        export AWS_REGION
+        export K8S_VERSION
+        export GPU_AVAILABILITY_ZONE
+        export CPU_NODE_TYPE
+        export CPU_NODE_COUNT
+        export GPU_NODE_TYPE
+        export GPU_NODE_COUNT
+        export CAPACITY_RESERVATION_ID
+    fi
+    
+    # GCP-specific exports (Terraform variables)
+    if [[ "$CSP" == "gcp" ]]; then
+        # Required Terraform variables
+        export TF_VAR_project_id="${GCP_PROJECT_ID}"
+        export TF_VAR_deployment_id="${TF_VAR_deployment_id:-d$(date +%s)}"
+        export TF_VAR_zone="${GCP_ZONE}"
+        export TF_VAR_region="${GCP_REGION}"
+        
+        # Optional: can be overridden via environment
+        export TF_VAR_system_node_type="${TF_VAR_system_node_type:-e2-standard-4}"
+        export TF_VAR_system_node_count="${TF_VAR_system_node_count:-3}"
+    fi
     
     # Get the cluster creation script for this CSP
     local cluster_script
@@ -236,6 +423,18 @@ install_apps() {
     export CERT_MANAGER_VERSION
     export NVSENTINEL_VERSION
     
+    # Export GCP variables for janitor-provider configuration
+    if [[ "$CSP" == "gcp" ]]; then
+        export GCP_PROJECT_ID
+        export GCP_ZONE
+        export GCP_SERVICE_ACCOUNT
+    fi
+    
+    # Export registry values file if using local build
+    if [[ "$USE_LOCAL_BUILD" == "true" ]]; then
+        export ECR_VALUES_FILE  # Works for both ECR and GAR (GAR sets this to GAR_VALUES_FILE)
+    fi
+    
     ./install-apps.sh
     
     log "Applications installed successfully ✓"
@@ -257,11 +456,33 @@ main() {
     log "========================================="
     log "CSP: $CSP"
     log "Cluster: $CLUSTER_NAME"
-    log "NVSentinel Version: $NVSENTINEL_VERSION"
+    if [[ "$USE_LOCAL_BUILD" == "true" ]]; then
+        if [[ "$CSP" == "aws" ]]; then
+            log "Build Mode: Local (ECR)"
+            log "ECR Repo Prefix: $ECR_REPO_PREFIX"
+        elif [[ "$CSP" == "gcp" ]]; then
+            log "Build Mode: Local (GAR)"
+            log "GCP Project: $GCP_PROJECT_ID"
+            log "GCP Region: $GCP_REGION"
+            log "GAR Repo Name: $GAR_REPO_NAME"
+        fi
+    else
+        log "NVSentinel Version: $NVSENTINEL_VERSION"
+    fi
     log "Delete on Exit: $DELETE_CLUSTER_ON_EXIT"
     log "========================================="
     
     check_prerequisites
+    
+    # Build images first if using local build mode
+    if [[ "$USE_LOCAL_BUILD" == "true" ]]; then
+        if [[ "$CSP" == "aws" ]]; then
+            setup_ecr_and_build
+        elif [[ "$CSP" == "gcp" ]]; then
+            setup_gar_and_build
+        fi
+    fi
+    
     create_cluster
     install_apps
     run_tests
