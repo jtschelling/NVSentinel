@@ -293,6 +293,14 @@ fault-remediation:
         completeConditionType: "NodeReady"
         templateFileName: "rebootnode-template.yaml"
         equivalenceGroup: "restart"
+      "CONTACT_SUPPORT":  # Action 5 - for drop rules testing
+        apiGroup: "janitor.dgxc.nvidia.com"
+        version: "v1alpha1"
+        kind: "RebootNode"
+        scope: "Cluster"
+        completeConditionType: "NodeReady"
+        templateFileName: "rebootnode-template.yaml"
+        equivalenceGroup: "contact-support"
 
     templates:
       "gpureset-template.yaml": |
@@ -317,15 +325,20 @@ fault-remediation:
         spec:
           nodeName: {{ .HealthEvent.NodeName }}
 
+  # Drop rules: drop CONTACT_SUPPORT events that don't have MANUAL_SUPPORT_REQUEST errorCode.
+  # Only events from the manual-support-request KOM policy will pass through.
+  dropRules:
+    - expression: "event.recommendedAction == 5.0 && !('MANUAL_SUPPORT_REQUEST' in event.errorCode)"
+
   logCollector:
     enabled: true
     image:
       repository: localhost:5001/ghcr.io_nvidia_nvsentinel_log-collector
-      tag: latest  
-      pullPolicy: Always 
+      tag: latest
+      pullPolicy: Always
     timeout: "10s"  # Short timeout for faster testing (production default: "10m")
     env:
-      MOCK_MODE: "true"  
+      MOCK_MODE: "true"
   affinity:
     podAntiAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
@@ -3890,11 +3903,33 @@ kubernetes-object-monitor:
           resource.status.conditions.filter(c, c.type == "TestCondition" && c.status == "False").size() > 0
       healthEvent:
         componentClass: Node
-        isFatal: false
+        isFatal: true
         message: "Node test condition is not ready"
         recommendedAction: CONTACT_SUPPORT
         errorCode:
           - NODE_TEST_CONDITION_NOT_READY
+
+    # Manual support request: triggers when a node has the annotation
+    # nvsentinel.nvidia.com/request-support: "true". Generates a CONTACT_SUPPORT
+    # event with MANUAL_SUPPORT_REQUEST errorCode, which passes through drop rules.
+    - name: manual-support-request
+      enabled: true
+      resource:
+        group: ""
+        version: v1
+        kind: Node
+      predicate:
+        expression: |
+          has(resource.metadata.annotations) &&
+          'nvsentinel.nvidia.com/request-support' in resource.metadata.annotations &&
+          resource.metadata.annotations['nvsentinel.nvidia.com/request-support'] == 'true'
+      healthEvent:
+        componentClass: Node
+        isFatal: true
+        message: "Manual support request via node annotation"
+        recommendedAction: CONTACT_SUPPORT
+        errorCode:
+          - MANUAL_SUPPORT_REQUEST
 
     # This policy monitors DaemonSet pods in the gpu-operator namespace and publishes
     # fatal health events when pods are unhealthy. It detects:
