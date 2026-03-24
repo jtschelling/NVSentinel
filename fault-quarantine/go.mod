@@ -7,6 +7,7 @@ toolchain go1.25.3
 require (
 	github.com/google/cel-go v0.27.0
 	github.com/hashicorp/go-multierror v1.1.1
+	github.com/nvidia/nvsentinel/cel-evaluator v0.0.0
 	github.com/nvidia/nvsentinel/commons v0.0.0
 	github.com/nvidia/nvsentinel/data-models v0.0.0
 	github.com/nvidia/nvsentinel/store-client v0.0.0
@@ -103,3 +104,5 @@ replace github.com/nvidia/nvsentinel/store-client => ../store-client
 replace github.com/nvidia/nvsentinel/data-models => ../data-models
 
 replace github.com/nvidia/nvsentinel/commons => ../commons
+
+replace github.com/nvidia/nvsentinel/cel-evaluator => ../cel-evaluator

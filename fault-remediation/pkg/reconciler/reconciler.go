@@ -30,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
+	celevaluator "github.com/nvidia/nvsentinel/cel-evaluator/pkg/evaluator"
 	"github.com/nvidia/nvsentinel/commons/pkg/eventutil"
 	"github.com/nvidia/nvsentinel/commons/pkg/statemanager"
 	"github.com/nvidia/nvsentinel/data-models/pkg/model"
@@ -54,6 +55,7 @@ type ReconcilerConfig struct {
 	EnableLogCollector bool
 	UpdateMaxRetries   int
 	UpdateRetryDelay   time.Duration
+	DropRuleEvaluator  *celevaluator.DropRuleEvaluator
 }
 
 // FaultRemediationReconciler reconciles health events from a datastore change stream
@@ -282,6 +284,24 @@ func (r *FaultRemediationReconciler) handleRemediationEvent(
 ) (ctrl.Result, error) {
 	healthEvent := healthEventWithStatus.HealthEvent
 	nodeName := healthEvent.NodeName
+
+	if r.Config.DropRuleEvaluator != nil {
+		shouldDrop, err := r.Config.DropRuleEvaluator.ShouldDrop(healthEvent)
+		if err != nil {
+			slog.Error("Error evaluating drop rules, failing open", "error", err, "node", nodeName)
+		}
+
+		if shouldDrop {
+			slog.Info("Event dropped by CEL drop rule",
+				"node", nodeName,
+				"agent", healthEvent.Agent,
+				"checkName", healthEvent.CheckName,
+				"recommendedAction", healthEvent.RecommendedAction.String())
+			metrics.EventsDroppedByRule.WithLabelValues(nodeName).Inc()
+
+			return r.markProcessedOrError(ctx, watcherInstance, eventWithToken, nodeName)
+		}
+	}
 
 	groupConfig, err := common.GetGroupConfigForEvent(r.Config.RemediationClient.GetConfig().RemediationActions,
 		healthEvent)

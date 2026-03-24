@@ -29,6 +29,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
+	celevaluator "github.com/nvidia/nvsentinel/cel-evaluator/pkg/evaluator"
 	"github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/fault-quarantine/pkg/common"
 	"github.com/nvidia/nvsentinel/fault-quarantine/pkg/informer"
@@ -234,7 +235,7 @@ func TestRoundTrip(t *testing.T) {
 		NodeName:           "test-node",
 	}
 
-	result, err := RoundTrip(event)
+	result, err := celevaluator.RoundTrip(event)
 	if err != nil {
 		t.Fatalf("Failed to roundtrip event: %v", err)
 	}

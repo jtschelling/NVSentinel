@@ -58,6 +58,15 @@ var (
 		[]string{"action", "node_name"},
 	)
 
+	// Drop Rule Metrics
+	EventsDroppedByRule = promauto.With(crmetrics.Registry).NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "fault_remediation_events_dropped_by_rule_total",
+			Help: "Total number of events dropped by CEL drop rules.",
+		},
+		[]string{"node_name"},
+	)
+
 	// Performance Metrics
 	EventHandlingDuration = promauto.With(crmetrics.Registry).NewHistogram(
 		prometheus.HistogramOpts{

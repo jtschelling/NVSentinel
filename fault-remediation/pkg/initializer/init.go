@@ -24,6 +24,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
+	celevaluator "github.com/nvidia/nvsentinel/cel-evaluator/pkg/evaluator"
 	"github.com/nvidia/nvsentinel/commons/pkg/configmanager"
 	"github.com/nvidia/nvsentinel/commons/pkg/statemanager"
 	"github.com/nvidia/nvsentinel/fault-remediation/pkg/config"
@@ -71,6 +72,11 @@ func InitializeAll(
 		slog.Info("Log collector enabled")
 	}
 
+	dropRuleEvaluator, err := initDropRuleEvaluator(tomlConfig)
+	if err != nil {
+		return nil, err
+	}
+
 	remediationClient, stateManager, err := initRemediationAndStateManager(params.Config, ctrlruntimeClient,
 		params.DryRun, tomlConfig)
 	if err != nil {
@@ -99,6 +105,7 @@ func InitializeAll(
 		EnableLogCollector: params.EnableLogCollector,
 		UpdateMaxRetries:   tomlConfig.UpdateRetry.MaxRetries,
 		UpdateRetryDelay:   time.Duration(tomlConfig.UpdateRetry.RetryDelaySeconds) * time.Second,
+		DropRuleEvaluator:  dropRuleEvaluator,
 	}
 
 	slog.Info("Initialization completed successfully")
@@ -176,4 +183,24 @@ func initDatastoreAndWatcher(
 	healthEventStore := ds.HealthEventStore()
 
 	return ds, watcherInstance, healthEventStore, datastoreConfig, nil
+}
+
+func initDropRuleEvaluator(tomlConfig *config.TomlConfig) (*celevaluator.DropRuleEvaluator, error) {
+	if len(tomlConfig.DropRules) == 0 {
+		return nil, nil
+	}
+
+	expressions := make([]string, len(tomlConfig.DropRules))
+	for i, rule := range tomlConfig.DropRules {
+		expressions[i] = rule.Expression
+	}
+
+	eval, err := celevaluator.NewDropRuleEvaluator(expressions)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize drop rule evaluator: %w", err)
+	}
+
+	slog.Info("Initialized drop rule evaluator", "ruleCount", len(expressions))
+
+	return eval, nil
 }

@@ -71,6 +71,12 @@ type UpdateRetry struct {
 	RetryDelaySeconds int `toml:"retryDelaySeconds"`
 }
 
+// DropRule defines a CEL expression used to filter events before remediation.
+// If any drop rule expression matches, the event is silently dropped.
+type DropRule struct {
+	Expression string `toml:"expression"`
+}
+
 // TomlConfig holds the complete TOML configuration for fault remediation
 type TomlConfig struct {
 	// Template mount configuration
@@ -84,6 +90,10 @@ type TomlConfig struct {
 
 	// Common configuration
 	UpdateRetry UpdateRetry `toml:"updateRetry"`
+
+	// DropRules defines CEL expressions for filtering events before remediation.
+	// Events matching any drop rule are silently discarded.
+	DropRules []DropRule `toml:"dropRules"`
 }
 
 // Validate checks the configuration for consistency and completeness
