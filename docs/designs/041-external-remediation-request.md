@@ -7,7 +7,6 @@ NVSentinel is the primary owner of nodes in the clusters where it operates: when
 For most failure modes, NVSentinel can remediate end-to-end with the existing maintenance CRs — `RebootNode`, `GPUReset`, `TerminateNode`. But there is a class of remediations NVSentinel cannot perform itself:
 
 - CSP-side hardware repair (out-of-cluster work driven by a cloud provider's support workflow)
-- RMA workflows (physical hardware swap performed by a vendor or operator)
 - Long-running orchestrated workflows handled by external automation
 - Manual operator intervention on physical infrastructure
 
@@ -257,13 +256,12 @@ The trade-off vs. duplicating the ERR name to a Node label is explicit: filterin
 `fault-remediation` already uses `GetEffectiveActionName(he)` (per ADR-036) to resolve the action name for routing. To produce ERRs:
 
 - **TOML config** — declare the external-remediation action's `MaintenanceResource` with `apiGroup: "nvsentinel.nvidia.com"` and `kind: "ExternalRemediationRequest"`. No schema extension is needed; this reuses the same `apiGroup` + `kind` knobs that already route the reboot action to `janitor.dgxc.nvidia.com` / `RebootNode`.
-- **`fault-remediation/pkg/remediation/remediation.go`** — `CreateMaintenanceResource` already builds the maintenance CR from `apiGroup` + `kind` via the dynamic client. The branch for `ExternalRemediationRequest` mostly falls out of the existing template-render path; only the ERR-specific fields (labels) need explicit handling.
+- **`fault-remediation/pkg/remediation/remediation.go`** — `CreateMaintenanceResource` already builds the maintenance CR from `apiGroup` + `kind` via the dynamic client. The branch for `ExternalRemediationRequest` mostly falls out of the existing template-render path
 
 ERR construction details:
 
 - `metadata.name` is a deterministic hash of `(nodeName, healthEvent.id)` so repeated reconciles of the same event do not create duplicate ERRs. The name **also** becomes the value of the release taint applied by the ERR reconciler — so it MUST be a valid Kubernetes taint value (≤ 63 chars, alphanum + `.`, `-`, `_`).
 - `metadata.namespace` is the configured ERR namespace (default: `nvsentinel`).
-- `metadata.labels` include `nvsentinel.nvidia.com/node`, `…/component-class`, and `…/recommended-action` for observability inside the ERR API (these do NOT propagate to the Node — see "Discovery from the Node side" for the rationale).
 - `spec` (the inlined HealthEvent) is a full copy of the triaged event.
 
 **Equivalence-group integration.** ERR creation goes through the same `latestFaultRemediationState`-annotation + `ShouldSkipCRCreation` machinery as existing maintenance CRs (`RebootNode`, `GPUReset`, etc.) — see `fault-remediation/pkg/reconciler/reconciler.go` `shouldCreateCRForGroup`. Two pieces are added:
@@ -344,7 +342,7 @@ In addition to the metrics above, the ERR reconciler exposes `controller_runtime
 - **Single coordination surface for external remediation.** One CRD, one reconciler, one integration point in `fault-remediation`. Any external system — automated orchestrator, vendor support team, individual operator — speaks the same protocol. No bespoke per-system entry/exit.
 - **CRDs are debuggable.** Operators can `kubectl get err -A` to see every node currently outside NVSentinel ownership and the reason. Status conditions surface the exact step the handoff is on.
 - **Plugs into ADR-036.** The `CUSTOM` recommended action and `GetEffectiveActionName` resolution already exist; this ADR layers the ERR-producing branch on top of that machinery rather than introducing a parallel routing path.
-- **Asynchronous by design.** Remediation can take hours to weeks (RMA, replacement parts, scheduled CSP windows). The protocol does not require either side to be online for the other to progress.
+- **Asynchronous by design.** Remediation can take hours to weeks. The protocol does not require either side to be online for the other to progress.
 - **Reuses the existing pipeline.** The ERR is produced as the terminal artifact of the standard quarantine → drain → fault-remediation path, with no special routing.
 
 ## Consequences
