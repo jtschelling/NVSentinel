@@ -25,6 +25,7 @@ import (
 	. "github.com/onsi/gomega"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/types/known/timestamppb"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -171,38 +172,32 @@ var _ = Describe("ExternalRemediationRequest Controller", func() {
 		}
 	})
 
-	It("is a no-op when the ERR has a deletionTimestamp and the cleanup finalizer", func() {
-		errObj := newTestERR("delete-err-1", "node-del-1")
+	It("removes the cleanup finalizer when the ERR is deleted before apply ran (Node missing)", func() {
+		// Deletion-pending before any Node interaction happened. cleanup helper finds
+		// no Node, treats as already-clean, removes finalizer.
+		errObj := newTestERR("delete-no-apply-err-1", "node-never-existed")
 		Expect(r.Client.Create(ctx, errObj)).To(Succeed())
-		DeferCleanup(forceFinalizerRemoval, ctx, r, errObj)
 
 		key := ctrlclient.ObjectKey{Name: errObj.Name, Namespace: errObj.Namespace}
-		reconcileToSteadyState(ctx, r, key, 3)
+		// Drive init only (finalizer + initial conditions). Don't continue further;
+		// the apply path would requeue forever waiting for the missing Node.
+		for i := 0; i < 2; i++ {
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred(), "init pass %d", i+1)
+		}
 
-		// Delete; finalizer holds the object alive with a deletionTimestamp.
 		Expect(r.Client.Delete(ctx, errObj)).To(Succeed())
 
-		var afterDelete nvsentinelv1.ExternalRemediationRequest
-		Expect(r.Client.Get(ctx, key, &afterDelete)).To(Succeed())
-		Expect(afterDelete.DeletionTimestamp.IsZero()).To(BeFalse(),
-			"deletionTimestamp must be set with finalizer still attached")
-		Expect(controllerutil.ContainsFinalizer(&afterDelete, ExternalRemediationFinalizer)).To(BeTrue())
+		// One reconcile to run cleanup + remove the finalizer.
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
 
-		condBefore := snapshotConditions(&afterDelete)
-		finBefore := append([]string(nil), afterDelete.Finalizers...)
-
-		result, recErr := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
-		Expect(recErr).NotTo(HaveOccurred(), "deletion-pending reconcile must not error")
-		Expect(result.RequeueAfter).To(BeZero())
-		Expect(result.Requeue).To(BeFalse())
-
-		var afterReconcile nvsentinelv1.ExternalRemediationRequest
-		Expect(r.Client.Get(ctx, key, &afterReconcile)).To(Succeed())
-
-		Expect(snapshotConditions(&afterReconcile)).To(Equal(condBefore),
-			"deletion-pending branch must not mutate status conditions in this slice")
-		Expect(afterReconcile.Finalizers).To(Equal(finBefore),
-			"deletion-pending branch must not remove the finalizer in this slice")
+		// ERR must be fully gone now — apiserver garbage-collects once the
+		// finalizer is removed.
+		var got nvsentinelv1.ExternalRemediationRequest
+		err = r.Client.Get(ctx, key, &got)
+		Expect(apierrors.IsNotFound(err)).To(BeTrue(),
+			"ERR must be garbage-collected after the cleanup finalizer is removed")
 	})
 
 	It("swallows reconciles for missing objects", func() {
@@ -212,6 +207,331 @@ var _ = Describe("ExternalRemediationRequest Controller", func() {
 		Expect(err).NotTo(HaveOccurred(), "missing object must be swallowed via client.IgnoreNotFound")
 		Expect(result.RequeueAfter).To(BeZero())
 		Expect(result.Requeue).To(BeFalse())
+	})
+})
+
+// setExternalRemediationComplete sets the ExternalRemediationComplete condition
+// to the given status by issuing a status subresource patch — simulates the
+// external system reporting completion to the ERR.
+func setExternalRemediationComplete(
+	ctx context.Context, c ctrlclient.Client,
+	errObj *nvsentinelv1.ExternalRemediationRequest,
+	status string, reason string,
+) {
+	GinkgoHelper()
+
+	key := ctrlclient.ObjectKey{Name: errObj.Name, Namespace: errObj.Namespace}
+
+	var fresh nvsentinelv1.ExternalRemediationRequest
+	Expect(c.Get(ctx, key, &fresh)).To(Succeed())
+
+	original := fresh.DeepCopy()
+
+	conds := []metav1.Condition{}
+	if fresh.Status != nil {
+		for _, cnd := range fresh.Status.Conditions {
+			conds = append(conds, metav1.Condition{
+				Type:               cnd.Type,
+				Status:             metav1.ConditionStatus(cnd.Status),
+				Reason:             cnd.Reason,
+				Message:            cnd.Message,
+				LastTransitionTime: metav1.NewTime(cnd.LastTransitionTime.AsTime()),
+			})
+		}
+	}
+
+	// Find or replace ExternalRemediationComplete.
+	replaced := false
+
+	for i := range conds {
+		if conds[i].Type == ConditionExternalRemediationComplete {
+			conds[i] = metav1.Condition{
+				Type:               ConditionExternalRemediationComplete,
+				Status:             metav1.ConditionStatus(status),
+				Reason:             reason,
+				Message:            "set by test",
+				LastTransitionTime: metav1.Now(),
+			}
+			replaced = true
+
+			break
+		}
+	}
+
+	if !replaced {
+		conds = append(conds, metav1.Condition{
+			Type:               ConditionExternalRemediationComplete,
+			Status:             metav1.ConditionStatus(status),
+			Reason:             reason,
+			Message:            "set by test",
+			LastTransitionTime: metav1.Now(),
+		})
+	}
+
+	if fresh.Status == nil {
+		fresh.Status = &protos.ExternalRemediationRequestStatus{}
+	}
+
+	fresh.Status.Conditions = nil
+	for _, m := range conds {
+		fresh.Status.Conditions = append(fresh.Status.Conditions, &protos.Condition{
+			Type:               m.Type,
+			Status:             string(m.Status),
+			Reason:             m.Reason,
+			Message:            m.Message,
+			LastTransitionTime: timestamppb.New(m.LastTransitionTime.Time),
+		})
+	}
+
+	Expect(c.Status().Patch(ctx, &fresh, ctrlclient.MergeFrom(original))).To(Succeed())
+}
+
+var _ = Describe("ExternalRemediationRequest Controller resolution paths (branches 2+4)", func() {
+	var (
+		ctx context.Context
+		r   *ExternalRemediationRequestReconciler
+	)
+
+	BeforeEach(func() {
+		ctx = context.Background()
+		r = newERRReconciler()
+	})
+
+	// Drives an ERR through init + apply so the Node has taint+label and the
+	// ERR has NVSentinelOwnershipReleased=True. Returns the key for further use.
+	prepareReleased := func(errName, nodeName string) ctrlclient.ObjectKey {
+		GinkgoHelper()
+
+		Expect(r.Client.Create(ctx, newTestNode(nodeName, nil, nil))).To(Succeed())
+		errObj := newTestERR(errName, nodeName)
+		Expect(r.Client.Create(ctx, errObj)).To(Succeed())
+
+		key := ctrlclient.ObjectKey{Name: errObj.Name, Namespace: errObj.Namespace}
+		got := reconcileToSteadyState(ctx, r, key, 3)
+
+		released := findERRCondition(got, ConditionNVSentinelOwnershipReleased)
+		Expect(released).NotTo(BeNil())
+		Expect(released.Status).To(Equal("True"),
+			"apply path must succeed before resolution-path tests can run")
+
+		return key
+	}
+
+	Context("branch 4: ExternalRemediationComplete=True (external system reports success)", func() {
+		It("removes the release taint and managed=false label; ERR stays with finalizer", func() {
+			nodeName := "node-true-1"
+			key := prepareReleased("true-err-1", nodeName)
+			DeferCleanup(forceFinalizerRemovalByKey, ctx, r, key)
+			DeferCleanup(deleteNodeForCleanup, ctx, r, nodeName)
+
+			// External system reports success.
+			setExternalRemediationComplete(ctx, r.Client,
+				&nvsentinelv1.ExternalRemediationRequest{ObjectMeta: metav1.ObjectMeta{
+					Name: key.Name, Namespace: key.Namespace,
+				}}, "True", "ExternalRemediationSucceeded")
+
+			// One reconcile to run branch 4.
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+
+			var node corev1.Node
+			Expect(r.Client.Get(ctx, ctrlclient.ObjectKey{Name: nodeName}, &node)).To(Succeed())
+			Expect(findTaintByKey(node.Spec.Taints, ReleaseTaintKey)).To(BeNil(),
+				"release taint must be removed after Complete=True")
+			Expect(node.Labels).NotTo(HaveKey(ManagedLabelKey),
+				"managed label must be removed entirely (absence is the default-managed state)")
+
+			// ERR stays in the cluster as a historical record with the finalizer attached.
+			var got nvsentinelv1.ExternalRemediationRequest
+			Expect(r.Client.Get(ctx, key, &got)).To(Succeed())
+			Expect(controllerutil.ContainsFinalizer(&got, ExternalRemediationFinalizer)).To(BeTrue(),
+				"finalizer stays attached on True-driven cleanup (ERR is the historical record)")
+		})
+
+		It("does not re-PATCH the Node on subsequent reconciles after cleanup", func() {
+			nodeName := "node-true-idem-1"
+			key := prepareReleased("true-idem-err-1", nodeName)
+			DeferCleanup(forceFinalizerRemovalByKey, ctx, r, key)
+			DeferCleanup(deleteNodeForCleanup, ctx, r, nodeName)
+
+			setExternalRemediationComplete(ctx, r.Client,
+				&nvsentinelv1.ExternalRemediationRequest{ObjectMeta: metav1.ObjectMeta{
+					Name: key.Name, Namespace: key.Namespace,
+				}}, "True", "ExternalRemediationSucceeded")
+
+			// First reconcile: cleanup happens.
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+
+			var nodeAfterCleanup corev1.Node
+			Expect(r.Client.Get(ctx, ctrlclient.ObjectKey{Name: nodeName}, &nodeAfterCleanup)).To(Succeed())
+			rvAfterCleanup := nodeAfterCleanup.ResourceVersion
+
+			// Subsequent reconciles re-enter branch 4 but should short-circuit (nothing to remove).
+			for i := 0; i < 3; i++ {
+				_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			var nodeAfterRereconcile corev1.Node
+			Expect(r.Client.Get(ctx, ctrlclient.ObjectKey{Name: nodeName}, &nodeAfterRereconcile)).To(Succeed())
+			Expect(nodeAfterRereconcile.ResourceVersion).To(Equal(rvAfterCleanup),
+				"Node ResourceVersion must not advance after the cleanup PATCH settles")
+		})
+
+		It("leaves a foreign taint in place when another ERR claims the node (drift on cleanup)", func() {
+			// Drive an ERR to released, then sneak in a second taint with a different
+			// value, then trigger Complete=True. The cleanup must remove the matching
+			// taint and label but leave the foreign taint untouched.
+			nodeName := "node-true-drift-1"
+			key := prepareReleased("true-drift-err-1", nodeName)
+			DeferCleanup(forceFinalizerRemovalByKey, ctx, r, key)
+			DeferCleanup(deleteNodeForCleanup, ctx, r, nodeName)
+
+			// Manually mutate the node: replace our taint with one owned by a hypothetical other ERR.
+			// This simulates a drift state — should not happen in practice, but the helper must be safe.
+			var node corev1.Node
+			Expect(r.Client.Get(ctx, ctrlclient.ObjectKey{Name: nodeName}, &node)).To(Succeed())
+
+			origNode := node.DeepCopy()
+			for i := range node.Spec.Taints {
+				if node.Spec.Taints[i].Key == ReleaseTaintKey {
+					node.Spec.Taints[i].Value = "foreign-err"
+					break
+				}
+			}
+
+			Expect(r.Client.Patch(ctx, &node, ctrlclient.StrategicMergeFrom(origNode))).To(Succeed())
+
+			setExternalRemediationComplete(ctx, r.Client,
+				&nvsentinelv1.ExternalRemediationRequest{ObjectMeta: metav1.ObjectMeta{
+					Name: key.Name, Namespace: key.Namespace,
+				}}, "True", "ExternalRemediationSucceeded")
+
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(r.Client.Get(ctx, ctrlclient.ObjectKey{Name: nodeName}, &node)).To(Succeed())
+			taint := findTaintByKey(node.Spec.Taints, ReleaseTaintKey)
+			Expect(taint).NotTo(BeNil(), "foreign taint must NOT be removed by our cleanup")
+			Expect(taint.Value).To(Equal("foreign-err"))
+			Expect(node.Labels).NotTo(HaveKey(ManagedLabelKey),
+				"label removal is unconditional (cluster-wide semantics)")
+		})
+	})
+
+	Context("branch 2: deletionTimestamp set (operator-driven release)", func() {
+		It("runs cleanup and removes the finalizer; ERR is garbage-collected", func() {
+			nodeName := "node-del-1"
+			key := prepareReleased("del-err-1", nodeName)
+			DeferCleanup(deleteNodeForCleanup, ctx, r, nodeName)
+
+			Expect(r.Client.Delete(ctx, &nvsentinelv1.ExternalRemediationRequest{
+				ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace},
+			})).To(Succeed())
+
+			// One reconcile to handle branch 2 — cleanup + finalizer remove.
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Node should be clean.
+			var node corev1.Node
+			Expect(r.Client.Get(ctx, ctrlclient.ObjectKey{Name: nodeName}, &node)).To(Succeed())
+			Expect(findTaintByKey(node.Spec.Taints, ReleaseTaintKey)).To(BeNil())
+			Expect(node.Labels).NotTo(HaveKey(ManagedLabelKey))
+
+			// ERR should be garbage-collected.
+			var got nvsentinelv1.ExternalRemediationRequest
+			err = r.Client.Get(ctx, key, &got)
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(),
+				"ERR must be garbage-collected after operator-driven cleanup")
+		})
+
+		It("removes the finalizer cleanly when cleanup already ran via Complete=True", func() {
+			nodeName := "node-stack-1"
+			key := prepareReleased("stack-err-1", nodeName)
+			DeferCleanup(deleteNodeForCleanup, ctx, r, nodeName)
+
+			// First: external system reports success → branch 4 cleans up.
+			setExternalRemediationComplete(ctx, r.Client,
+				&nvsentinelv1.ExternalRemediationRequest{ObjectMeta: metav1.ObjectMeta{
+					Name: key.Name, Namespace: key.Namespace,
+				}}, "True", "ExternalRemediationSucceeded")
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Then: operator deletes the (already-clean) ERR.
+			Expect(r.Client.Delete(ctx, &nvsentinelv1.ExternalRemediationRequest{
+				ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace},
+			})).To(Succeed())
+
+			var nodeBeforeDel corev1.Node
+			Expect(r.Client.Get(ctx, ctrlclient.ObjectKey{Name: nodeName}, &nodeBeforeDel)).To(Succeed())
+			rvBeforeDel := nodeBeforeDel.ResourceVersion
+
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Node was already clean: cleanup helper short-circuits, no PATCH.
+			var nodeAfter corev1.Node
+			Expect(r.Client.Get(ctx, ctrlclient.ObjectKey{Name: nodeName}, &nodeAfter)).To(Succeed())
+			Expect(nodeAfter.ResourceVersion).To(Equal(rvBeforeDel),
+				"already-clean cleanup must NOT re-PATCH the Node")
+
+			// ERR is garbage-collected.
+			var got nvsentinelv1.ExternalRemediationRequest
+			err = r.Client.Get(ctx, key, &got)
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(),
+				"ERR must be garbage-collected after operator-delete on already-clean state")
+		})
+
+		It("removes the finalizer even when the target Node has already been deleted", func() {
+			nodeName := "node-gone-1"
+			key := prepareReleased("gone-err-1", nodeName)
+			// Simulate the external system terminating the Node mid-remediation.
+			var node corev1.Node
+			Expect(r.Client.Get(ctx, ctrlclient.ObjectKey{Name: nodeName}, &node)).To(Succeed())
+			Expect(r.Client.Delete(ctx, &node)).To(Succeed())
+
+			Expect(r.Client.Delete(ctx, &nvsentinelv1.ExternalRemediationRequest{
+				ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace},
+			})).To(Succeed())
+
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred(), "cleanup must treat a missing Node as already-clean")
+
+			var got nvsentinelv1.ExternalRemediationRequest
+			err = r.Client.Get(ctx, key, &got)
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(),
+				"ERR must be garbage-collected even when its Node is gone")
+		})
+	})
+
+	It("runs the full happy-path lifecycle end-to-end (apply → Complete=True → cleanup)", func() {
+		nodeName := "node-lifecycle-1"
+		key := prepareReleased("lifecycle-err-1", nodeName)
+		DeferCleanup(forceFinalizerRemovalByKey, ctx, r, key)
+		DeferCleanup(deleteNodeForCleanup, ctx, r, nodeName)
+
+		var nodeAfterApply corev1.Node
+		Expect(r.Client.Get(ctx, ctrlclient.ObjectKey{Name: nodeName}, &nodeAfterApply)).To(Succeed())
+		Expect(findTaintByKey(nodeAfterApply.Spec.Taints, ReleaseTaintKey)).NotTo(BeNil())
+		Expect(nodeAfterApply.Labels).To(HaveKeyWithValue(ManagedLabelKey, ManagedLabelValueFalse))
+
+		setExternalRemediationComplete(ctx, r.Client,
+			&nvsentinelv1.ExternalRemediationRequest{ObjectMeta: metav1.ObjectMeta{
+				Name: key.Name, Namespace: key.Namespace,
+			}}, "True", "ExternalRemediationSucceeded")
+
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+
+		var nodeAfterCleanup corev1.Node
+		Expect(r.Client.Get(ctx, ctrlclient.ObjectKey{Name: nodeName}, &nodeAfterCleanup)).To(Succeed())
+		Expect(findTaintByKey(nodeAfterCleanup.Spec.Taints, ReleaseTaintKey)).To(BeNil(),
+			"end-of-lifecycle: release taint removed")
+		Expect(nodeAfterCleanup.Labels).NotTo(HaveKey(ManagedLabelKey),
+			"end-of-lifecycle: managed label removed")
 	})
 })
 
@@ -498,8 +818,13 @@ func deleteERRForCleanup(ctx context.Context, r *ExternalRemediationRequestRecon
 // forceFinalizerRemoval strips the cleanup finalizer (if present) and ensures
 // the object is fully deleted from the API server so tests don't bleed state.
 func forceFinalizerRemoval(ctx context.Context, r *ExternalRemediationRequestReconciler, errObj *nvsentinelv1.ExternalRemediationRequest) {
-	key := ctrlclient.ObjectKey{Name: errObj.Name, Namespace: errObj.Namespace}
+	forceFinalizerRemovalByKey(ctx, r, ctrlclient.ObjectKey{Name: errObj.Name, Namespace: errObj.Namespace})
+}
 
+// forceFinalizerRemovalByKey is the same as forceFinalizerRemoval but takes a
+// key directly — used by resolution-path tests where the test no longer holds
+// a live ERR pointer (the object may be mid-deletion or fully garbage-collected).
+func forceFinalizerRemovalByKey(ctx context.Context, r *ExternalRemediationRequestReconciler, key ctrlclient.ObjectKey) {
 	var fresh nvsentinelv1.ExternalRemediationRequest
 	if err := r.Client.Get(ctx, key, &fresh); err != nil {
 		return

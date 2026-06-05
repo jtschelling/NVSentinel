@@ -223,16 +223,16 @@ func (r *ExternalRemediationRequestReconciler) dispatch(
 
 	switch {
 	case !errObj.DeletionTimestamp.IsZero():
-		// Branch 2: deletion-driven cleanup. Filled in by the resolution-paths slice.
-		return ctrl.Result{}, nil
+		// Branch 2: deletion-driven cleanup — remove taint+label, then remove the finalizer.
+		return r.reconcileCleanupOnDeletion(ctx, errObj)
 
 	case isConditionStatus(conds, ConditionNVSentinelOwnershipReleased, metav1.ConditionUnknown):
 		// Branch 3: apply path — release taint + managed=false label, single PATCH.
 		return r.reconcileApply(ctx, errObj)
 
 	case meta.IsStatusConditionTrue(conds, ConditionExternalRemediationComplete):
-		// Branch 4: external system signalled success — run cleanup. Filled in by the resolution-paths slice.
-		return ctrl.Result{}, nil
+		// Branch 4: external system signalled success — remove taint+label; ERR stays as historical record.
+		return r.reconcileCleanupAfterComplete(ctx, errObj)
 
 	case meta.IsStatusConditionFalse(conds, ConditionExternalRemediationComplete):
 		// Branch 5: external system signalled failure — intentional no-op (asymmetric handling per ADR-040).
@@ -348,6 +348,145 @@ func (r *ExternalRemediationRequestReconciler) reconcileApply(
 	return ctrl.Result{}, r.transitionReleased(ctx, errObj, metav1.ConditionTrue, ReasonReleaseTaintApplied,
 		fmt.Sprintf("applied release taint %s=%s and managed=false label to node %q",
 			ReleaseTaintKey, errObj.Name, nodeName))
+}
+
+// reconcileCleanupAfterComplete implements branch 4. The external system has
+// reported success, so remove the release taint and managed=false label from
+// the target Node. The ERR stays in the cluster with its finalizer attached as
+// a historical record; operators can clean up historical ERRs en masse via
+// `kubectl delete err --all` or rely on the TTL reconciler.
+//
+// ExternalRemediationComplete=True is already terminal — no condition
+// transition is performed by this branch.
+func (r *ExternalRemediationRequestReconciler) reconcileCleanupAfterComplete(
+	ctx context.Context, errObj *nvsentinelv1.ExternalRemediationRequest,
+) (ctrl.Result, error) {
+	if err := r.reconcileCleanup(ctx, errObj); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	return ctrl.Result{}, nil
+}
+
+// reconcileCleanupOnDeletion implements branch 2. An operator (or external
+// automation) has run `kubectl delete err <name>`; the finalizer keeps the
+// object alive until we run cleanup. Apply the same cleanup PATCH as branch 4,
+// then remove the finalizer so Kubernetes garbage-collects the ERR.
+//
+// Idempotent against post-True state — if branch 4 already ran cleanup, the
+// reconcileCleanup helper short-circuits and we proceed straight to finalizer
+// removal.
+func (r *ExternalRemediationRequestReconciler) reconcileCleanupOnDeletion(
+	ctx context.Context, errObj *nvsentinelv1.ExternalRemediationRequest,
+) (ctrl.Result, error) {
+	if !controllerutil.ContainsFinalizer(errObj, ExternalRemediationFinalizer) {
+		// Finalizer already gone — nothing left for us to do.
+		return ctrl.Result{}, nil
+	}
+
+	if err := r.reconcileCleanup(ctx, errObj); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	updated := errObj.DeepCopy()
+	controllerutil.RemoveFinalizer(updated, ExternalRemediationFinalizer)
+
+	if err := r.Update(ctx, updated); err != nil {
+		return ctrl.Result{}, fmt.Errorf("removing cleanup finalizer from ExternalRemediationRequest %s: %w",
+			errObj.Name, err)
+	}
+
+	slog.InfoContext(ctx, "removed cleanup finalizer; ExternalRemediationRequest will be garbage-collected",
+		"err", errObj.Name)
+
+	return ctrl.Result{}, nil
+}
+
+// reconcileCleanup is the shared cleanup PATCH: removes the release taint
+// (only if its value matches this ERR's metadata.name — drift-safe) and
+// removes the managed label entirely. Both mutations land in one
+// strategic-merge PATCH against the Node.
+//
+// Per ADR-040, removing the label is preferred over setting it to "true" —
+// absence is the default-managed state and leaves no rotting hint behind.
+//
+// Short-circuits when there's nothing to remove (taint already absent and
+// label already absent) so re-reconciles in either cleanup branch do not
+// generate spurious PATCHes. The Node also vanishing (e.g. terminated by an
+// external system) is treated as already-clean.
+func (r *ExternalRemediationRequestReconciler) reconcileCleanup(
+	ctx context.Context, errObj *nvsentinelv1.ExternalRemediationRequest,
+) error {
+	nodeName := ""
+	if errObj.Spec != nil && errObj.Spec.HealthEvent != nil {
+		nodeName = errObj.Spec.HealthEvent.NodeName
+	}
+
+	if nodeName == "" {
+		// Nothing to clean if we never knew which Node to release in the first place.
+		return nil
+	}
+
+	var node corev1.Node
+	if err := r.Get(ctx, client.ObjectKey{Name: nodeName}, &node); err != nil {
+		if apierrors.IsNotFound(err) {
+			slog.InfoContext(ctx, "target Node already gone; nothing to clean up",
+				"err", errObj.Name, "node", nodeName)
+
+			return nil
+		}
+
+		return fmt.Errorf("get node %q for ERR %q cleanup: %w", nodeName, errObj.Name, err)
+	}
+
+	nodeToUpdate := node.DeepCopy()
+	changed := false
+
+	if existing := findTaintByKey(nodeToUpdate.Spec.Taints, ReleaseTaintKey); existing != nil {
+		switch existing.Value {
+		case errObj.Name:
+			nodeToUpdate.Spec.Taints = removeTaintByKey(nodeToUpdate.Spec.Taints, ReleaseTaintKey)
+			changed = true
+		default:
+			// Drift: another ERR claims the taint. Leave it alone — that ERR's
+			// own cleanup path will remove it. Logging only; not an error.
+			slog.WarnContext(ctx, "release taint owned by a different ERR; leaving in place during cleanup",
+				"err", errObj.Name, "node", nodeName, "existing_owner", existing.Value)
+		}
+	}
+
+	if _, ok := nodeToUpdate.Labels[ManagedLabelKey]; ok {
+		delete(nodeToUpdate.Labels, ManagedLabelKey)
+		changed = true
+	}
+
+	if !changed {
+		return nil
+	}
+
+	if err := r.Patch(ctx, nodeToUpdate, client.StrategicMergeFrom(&node)); err != nil {
+		return fmt.Errorf("patch node %q for ERR %q cleanup: %w", nodeName, errObj.Name, err)
+	}
+
+	slog.InfoContext(ctx, "removed release taint and managed label from node",
+		"err", errObj.Name, "node", nodeName)
+
+	return nil
+}
+
+// removeTaintByKey returns a new slice with all taints whose key matches
+// removed. Allocates a fresh backing array so callers don't accidentally
+// mutate the original.
+func removeTaintByKey(taints []corev1.Taint, key string) []corev1.Taint {
+	out := make([]corev1.Taint, 0, len(taints))
+
+	for i := range taints {
+		if taints[i].Key != key {
+			out = append(out, taints[i])
+		}
+	}
+
+	return out
 }
 
 // findTaintByKey returns a pointer to the first taint with the given key, or
