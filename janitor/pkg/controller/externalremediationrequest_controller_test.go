@@ -210,6 +210,30 @@ var _ = Describe("ExternalRemediationRequest Controller", func() {
 	})
 })
 
+// prepareReleased drives an ERR through init + apply so the Node has taint+label
+// and the ERR has NVSentinelOwnershipReleased=True. Tests that need a "post-
+// applied" starting state call this first. Returns the ERR's ObjectKey.
+func prepareReleased(
+	ctx context.Context, r *ExternalRemediationRequestReconciler,
+	errName, nodeName string,
+) ctrlclient.ObjectKey {
+	GinkgoHelper()
+
+	Expect(r.Client.Create(ctx, newTestNode(nodeName, nil, nil))).To(Succeed())
+	errObj := newTestERR(errName, nodeName)
+	Expect(r.Client.Create(ctx, errObj)).To(Succeed())
+
+	key := ctrlclient.ObjectKey{Name: errObj.Name, Namespace: errObj.Namespace}
+	got := reconcileToSteadyState(ctx, r, key, 3)
+
+	released := findERRCondition(got, ConditionNVSentinelOwnershipReleased)
+	Expect(released).NotTo(BeNil())
+	Expect(released.Status).To(Equal("True"),
+		"apply path must succeed before post-released tests can run")
+
+	return key
+}
+
 // setExternalRemediationComplete sets the ExternalRemediationComplete condition
 // to the given status by issuing a status subresource patch — simulates the
 // external system reporting completion to the ERR.
@@ -297,30 +321,10 @@ var _ = Describe("ExternalRemediationRequest Controller resolution paths (branch
 		r = newERRReconciler()
 	})
 
-	// Drives an ERR through init + apply so the Node has taint+label and the
-	// ERR has NVSentinelOwnershipReleased=True. Returns the key for further use.
-	prepareReleased := func(errName, nodeName string) ctrlclient.ObjectKey {
-		GinkgoHelper()
-
-		Expect(r.Client.Create(ctx, newTestNode(nodeName, nil, nil))).To(Succeed())
-		errObj := newTestERR(errName, nodeName)
-		Expect(r.Client.Create(ctx, errObj)).To(Succeed())
-
-		key := ctrlclient.ObjectKey{Name: errObj.Name, Namespace: errObj.Namespace}
-		got := reconcileToSteadyState(ctx, r, key, 3)
-
-		released := findERRCondition(got, ConditionNVSentinelOwnershipReleased)
-		Expect(released).NotTo(BeNil())
-		Expect(released.Status).To(Equal("True"),
-			"apply path must succeed before resolution-path tests can run")
-
-		return key
-	}
-
 	Context("branch 4: ExternalRemediationComplete=True (external system reports success)", func() {
 		It("removes the release taint and managed=false label; ERR stays with finalizer", func() {
 			nodeName := "node-true-1"
-			key := prepareReleased("true-err-1", nodeName)
+			key := prepareReleased(ctx, r,"true-err-1", nodeName)
 			DeferCleanup(forceFinalizerRemovalByKey, ctx, r, key)
 			DeferCleanup(deleteNodeForCleanup, ctx, r, nodeName)
 
@@ -350,7 +354,7 @@ var _ = Describe("ExternalRemediationRequest Controller resolution paths (branch
 
 		It("does not re-PATCH the Node on subsequent reconciles after cleanup", func() {
 			nodeName := "node-true-idem-1"
-			key := prepareReleased("true-idem-err-1", nodeName)
+			key := prepareReleased(ctx, r,"true-idem-err-1", nodeName)
 			DeferCleanup(forceFinalizerRemovalByKey, ctx, r, key)
 			DeferCleanup(deleteNodeForCleanup, ctx, r, nodeName)
 
@@ -384,7 +388,7 @@ var _ = Describe("ExternalRemediationRequest Controller resolution paths (branch
 			// value, then trigger Complete=True. The cleanup must remove the matching
 			// taint and label but leave the foreign taint untouched.
 			nodeName := "node-true-drift-1"
-			key := prepareReleased("true-drift-err-1", nodeName)
+			key := prepareReleased(ctx, r,"true-drift-err-1", nodeName)
 			DeferCleanup(forceFinalizerRemovalByKey, ctx, r, key)
 			DeferCleanup(deleteNodeForCleanup, ctx, r, nodeName)
 
@@ -423,7 +427,7 @@ var _ = Describe("ExternalRemediationRequest Controller resolution paths (branch
 	Context("branch 2: deletionTimestamp set (operator-driven release)", func() {
 		It("runs cleanup and removes the finalizer; ERR is garbage-collected", func() {
 			nodeName := "node-del-1"
-			key := prepareReleased("del-err-1", nodeName)
+			key := prepareReleased(ctx, r,"del-err-1", nodeName)
 			DeferCleanup(deleteNodeForCleanup, ctx, r, nodeName)
 
 			Expect(r.Client.Delete(ctx, &nvsentinelv1.ExternalRemediationRequest{
@@ -449,7 +453,7 @@ var _ = Describe("ExternalRemediationRequest Controller resolution paths (branch
 
 		It("removes the finalizer cleanly when cleanup already ran via Complete=True", func() {
 			nodeName := "node-stack-1"
-			key := prepareReleased("stack-err-1", nodeName)
+			key := prepareReleased(ctx, r,"stack-err-1", nodeName)
 			DeferCleanup(deleteNodeForCleanup, ctx, r, nodeName)
 
 			// First: external system reports success → branch 4 cleans up.
@@ -487,7 +491,7 @@ var _ = Describe("ExternalRemediationRequest Controller resolution paths (branch
 
 		It("removes the finalizer even when the target Node has already been deleted", func() {
 			nodeName := "node-gone-1"
-			key := prepareReleased("gone-err-1", nodeName)
+			key := prepareReleased(ctx, r,"gone-err-1", nodeName)
 			// Simulate the external system terminating the Node mid-remediation.
 			var node corev1.Node
 			Expect(r.Client.Get(ctx, ctrlclient.ObjectKey{Name: nodeName}, &node)).To(Succeed())
@@ -509,7 +513,7 @@ var _ = Describe("ExternalRemediationRequest Controller resolution paths (branch
 
 	It("runs the full happy-path lifecycle end-to-end (apply → Complete=True → cleanup)", func() {
 		nodeName := "node-lifecycle-1"
-		key := prepareReleased("lifecycle-err-1", nodeName)
+		key := prepareReleased(ctx, r,"lifecycle-err-1", nodeName)
 		DeferCleanup(forceFinalizerRemovalByKey, ctx, r, key)
 		DeferCleanup(deleteNodeForCleanup, ctx, r, nodeName)
 
@@ -532,6 +536,148 @@ var _ = Describe("ExternalRemediationRequest Controller resolution paths (branch
 			"end-of-lifecycle: release taint removed")
 		Expect(nodeAfterCleanup.Labels).NotTo(HaveKey(ManagedLabelKey),
 			"end-of-lifecycle: managed label removed")
+	})
+})
+
+var _ = Describe("ExternalRemediationRequest Controller asymmetric False handling (branch 5)", func() {
+	var (
+		ctx context.Context
+		r   *ExternalRemediationRequestReconciler
+	)
+
+	BeforeEach(func() {
+		ctx = context.Background()
+		r = newERRReconciler()
+	})
+
+	It("keeps the release taint and managed=false label in place when the external system reports failure", func() {
+		nodeName := "node-false-1"
+		key := prepareReleased(ctx, r, "false-err-1", nodeName)
+		DeferCleanup(forceFinalizerRemovalByKey, ctx, r, key)
+		DeferCleanup(deleteNodeForCleanup, ctx, r, nodeName)
+
+		var nodeBefore corev1.Node
+		Expect(r.Client.Get(ctx, ctrlclient.ObjectKey{Name: nodeName}, &nodeBefore)).To(Succeed())
+		rvBefore := nodeBefore.ResourceVersion
+
+		setExternalRemediationComplete(ctx, r.Client,
+			&nvsentinelv1.ExternalRemediationRequest{ObjectMeta: metav1.ObjectMeta{
+				Name: key.Name, Namespace: key.Namespace,
+			}}, "False", "ExternalRemediationFailed")
+
+		// One reconcile to run branch 5.
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+
+		var nodeAfter corev1.Node
+		Expect(r.Client.Get(ctx, ctrlclient.ObjectKey{Name: nodeName}, &nodeAfter)).To(Succeed())
+
+		// Critical guarantee: branch 5 must NOT touch the Node.
+		Expect(nodeAfter.ResourceVersion).To(Equal(rvBefore),
+			"branch 5 must NOT PATCH the Node — taint+label remain because operator has no signal what state the external system left the node in")
+		taint := findTaintByKey(nodeAfter.Spec.Taints, ReleaseTaintKey)
+		Expect(taint).NotTo(BeNil(), "release taint must remain in place on Complete=False")
+		Expect(taint.Value).To(Equal(key.Name))
+		Expect(nodeAfter.Labels).To(HaveKeyWithValue(ManagedLabelKey, ManagedLabelValueFalse),
+			"managed=false label must remain in place on Complete=False")
+	})
+
+	It("is idempotent: re-reconciles while at False do not PATCH the Node", func() {
+		nodeName := "node-false-idem-1"
+		key := prepareReleased(ctx, r, "false-idem-err-1", nodeName)
+		DeferCleanup(forceFinalizerRemovalByKey, ctx, r, key)
+		DeferCleanup(deleteNodeForCleanup, ctx, r, nodeName)
+
+		setExternalRemediationComplete(ctx, r.Client,
+			&nvsentinelv1.ExternalRemediationRequest{ObjectMeta: metav1.ObjectMeta{
+				Name: key.Name, Namespace: key.Namespace,
+			}}, "False", "ExternalRemediationFailed")
+
+		// First reconcile to settle into branch 5.
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+
+		var nodeBaseline corev1.Node
+		Expect(r.Client.Get(ctx, ctrlclient.ObjectKey{Name: nodeName}, &nodeBaseline)).To(Succeed())
+		rvBaseline := nodeBaseline.ResourceVersion
+
+		// Subsequent reconciles must not PATCH the Node.
+		for i := 0; i < 3; i++ {
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+		}
+
+		var nodeFinal corev1.Node
+		Expect(r.Client.Get(ctx, ctrlclient.ObjectKey{Name: nodeName}, &nodeFinal)).To(Succeed())
+		Expect(nodeFinal.ResourceVersion).To(Equal(rvBaseline),
+			"branch 5 must remain a no-op across repeated reconciles")
+	})
+
+	It("recovers via branch 4 when the external system retries and patches True", func() {
+		nodeName := "node-false-to-true-1"
+		key := prepareReleased(ctx, r, "false-to-true-err-1", nodeName)
+		DeferCleanup(forceFinalizerRemovalByKey, ctx, r, key)
+		DeferCleanup(deleteNodeForCleanup, ctx, r, nodeName)
+
+		// Failure path: external system reports False.
+		setExternalRemediationComplete(ctx, r.Client,
+			&nvsentinelv1.ExternalRemediationRequest{ObjectMeta: metav1.ObjectMeta{
+				Name: key.Name, Namespace: key.Namespace,
+			}}, "False", "ExternalRemediationFailed")
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+
+		// Verify taint+label still present (branch 5 left them alone).
+		var nodeAtFalse corev1.Node
+		Expect(r.Client.Get(ctx, ctrlclient.ObjectKey{Name: nodeName}, &nodeAtFalse)).To(Succeed())
+		Expect(findTaintByKey(nodeAtFalse.Spec.Taints, ReleaseTaintKey)).NotTo(BeNil())
+		Expect(nodeAtFalse.Labels).To(HaveKeyWithValue(ManagedLabelKey, ManagedLabelValueFalse))
+
+		// Retry: external system now reports True. Branch 4 must fire and clean up.
+		setExternalRemediationComplete(ctx, r.Client,
+			&nvsentinelv1.ExternalRemediationRequest{ObjectMeta: metav1.ObjectMeta{
+				Name: key.Name, Namespace: key.Namespace,
+			}}, "True", "ExternalRemediationSucceeded")
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+
+		var nodeAfterCleanup corev1.Node
+		Expect(r.Client.Get(ctx, ctrlclient.ObjectKey{Name: nodeName}, &nodeAfterCleanup)).To(Succeed())
+		Expect(findTaintByKey(nodeAfterCleanup.Spec.Taints, ReleaseTaintKey)).To(BeNil(),
+			"False->True retry must trigger branch 4 cleanup")
+		Expect(nodeAfterCleanup.Labels).NotTo(HaveKey(ManagedLabelKey))
+	})
+
+	It("releases the node via branch 2 when the operator deletes the ERR while it sits at False", func() {
+		nodeName := "node-false-del-1"
+		key := prepareReleased(ctx, r, "false-del-err-1", nodeName)
+		DeferCleanup(deleteNodeForCleanup, ctx, r, nodeName)
+
+		setExternalRemediationComplete(ctx, r.Client,
+			&nvsentinelv1.ExternalRemediationRequest{ObjectMeta: metav1.ObjectMeta{
+				Name: key.Name, Namespace: key.Namespace,
+			}}, "False", "ExternalRemediationFailed")
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+
+		// Operator forces release.
+		Expect(r.Client.Delete(ctx, &nvsentinelv1.ExternalRemediationRequest{
+			ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace},
+		})).To(Succeed())
+
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+
+		var nodeAfter corev1.Node
+		Expect(r.Client.Get(ctx, ctrlclient.ObjectKey{Name: nodeName}, &nodeAfter)).To(Succeed())
+		Expect(findTaintByKey(nodeAfter.Spec.Taints, ReleaseTaintKey)).To(BeNil(),
+			"operator delete must trigger branch 2 cleanup even from the False state")
+		Expect(nodeAfter.Labels).NotTo(HaveKey(ManagedLabelKey))
+
+		var got nvsentinelv1.ExternalRemediationRequest
+		err = r.Client.Get(ctx, key, &got)
+		Expect(apierrors.IsNotFound(err)).To(BeTrue(),
+			"ERR must be garbage-collected after operator delete from the False state")
 	})
 })
 

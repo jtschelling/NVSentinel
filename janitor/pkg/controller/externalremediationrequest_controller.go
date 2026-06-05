@@ -235,8 +235,8 @@ func (r *ExternalRemediationRequestReconciler) dispatch(
 		return r.reconcileCleanupAfterComplete(ctx, errObj)
 
 	case meta.IsStatusConditionFalse(conds, ConditionExternalRemediationComplete):
-		// Branch 5: external system signalled failure — intentional no-op (asymmetric handling per ADR-040).
-		return ctrl.Result{}, nil
+		// Branch 5: external system signalled failure — asymmetric no-op per ADR-040.
+		return r.reconcileNoOpOnFalse(ctx, errObj)
 
 	default:
 		// Branch 6: released and waiting on the external system. Nothing to do.
@@ -472,6 +472,48 @@ func (r *ExternalRemediationRequestReconciler) reconcileCleanup(
 		"err", errObj.Name, "node", nodeName)
 
 	return nil
+}
+
+// reconcileNoOpOnFalse implements branch 5. The external system has reported
+// failure via ExternalRemediationComplete=False — this is intentionally
+// asymmetric with True. Per ADR-040: when the external system signals failure,
+// NVSentinel has no knowledge of what state the node was left in (mid-RMA,
+// partial repair, hardware swapped but not validated, ...), so returning the
+// node to user workloads on that signal would be unsafe. The release taint
+// and managed=false label STAY; the node remains released until either:
+//
+//   - the external system patches ExternalRemediationComplete=True later
+//     (which fires branch 4 and runs cleanup), or
+//   - an operator runs `kubectl delete err <name>` (which fires branch 2 and
+//     runs cleanup + finalizer remove).
+//
+// This function deliberately does NOT call reconcileCleanup or any other Node
+// mutation — the explicit absence is the design contract.
+func (r *ExternalRemediationRequestReconciler) reconcileNoOpOnFalse(
+	ctx context.Context, errObj *nvsentinelv1.ExternalRemediationRequest,
+) (ctrl.Result, error) {
+	complete := meta.FindStatusCondition(statusConditions(errObj), ConditionExternalRemediationComplete)
+
+	nodeName := ""
+	if errObj.Spec != nil && errObj.Spec.HealthEvent != nil {
+		nodeName = errObj.Spec.HealthEvent.NodeName
+	}
+
+	var reason, message string
+	if complete != nil {
+		reason = complete.Reason
+		message = complete.Message
+	}
+
+	slog.InfoContext(ctx,
+		"external system reported failure; node remains released until operator deletes ERR or external system retries",
+		"err", errObj.Name,
+		"node", nodeName,
+		"external_reason", reason,
+		"external_message", message,
+	)
+
+	return ctrl.Result{}, nil
 }
 
 // removeTaintByKey returns a new slice with all taints whose key matches
