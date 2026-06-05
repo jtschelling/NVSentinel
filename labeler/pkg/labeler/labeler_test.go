@@ -940,6 +940,49 @@ func TestGateOnManaged(t *testing.T) {
 	}
 }
 
+// TestNodeRequiresReconciliation_ManagedLabelChanges verifies the watch
+// predicate fires on managed-label transitions. Without this, the gate is
+// dead code — node-labeler would never reconcile in response to an ERR
+// applying or removing managed=false.
+func TestNodeRequiresReconciliation_ManagedLabelChanges(t *testing.T) {
+	t.Parallel()
+
+	l := &Labeler{}
+
+	tests := []struct {
+		name     string
+		oldLabel string
+		newLabel string
+		want     bool
+	}{
+		{"absent -> false (ERR apply)", "", "false", true},
+		{"false -> absent (ERR cleanup)", "false", "", true},
+		{"false -> true", "false", "true", true},
+		{"absent -> absent (no change)", "", "", false},
+		{"false -> false (no change)", "false", "false", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			oldNode := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{}}}
+			newNode := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{}}}
+
+			if tt.oldLabel != "" {
+				oldNode.Labels[ManagedLabelKey] = tt.oldLabel
+			}
+
+			if tt.newLabel != "" {
+				newNode.Labels[ManagedLabelKey] = tt.newLabel
+			}
+
+			got := l.nodeRequiresReconciliation(oldNode, newNode)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 // TestManagedFalseRemovesDetectionLabelsViaHandleNodeEvent is the
 // integration sibling of TestGateOnManaged. It runs the full handleNodeEvent
 // path against envtest to verify the gate actually persists the label

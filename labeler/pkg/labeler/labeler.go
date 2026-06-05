@@ -452,8 +452,13 @@ func hasReadyDriverPod(objs []any, excludePod *v1.Pod) bool {
 
 // nodeRequiresReconciliation returns true only when a node update changed an
 // input label the labeler reads from nodes. DCGM and driver labels are driven
-// by pod events, so the node UpdateFunc only needs to react to changes in kata
-// detection labels and the gpu-present label (for assumeDriverInstalled mode).
+// by pod events, so the node UpdateFunc only needs to react to changes in:
+//
+//   - kata detection labels (drives KataEnabledLabel stamping),
+//   - the gpu-present label (for assumeDriverInstalled mode),
+//   - the managed label (drives the ERR opt-out gate per ADR-040 — when this
+//     flips to "false" we must strip detection labels; when it flips back
+//     away from "false" we must re-stamp).
 func (l *Labeler) nodeRequiresReconciliation(oldObj, newObj any) bool {
 	oldNode, ok1 := oldObj.(*v1.Node)
 	newNode, ok2 := newObj.(*v1.Node)
@@ -463,6 +468,10 @@ func (l *Labeler) nodeRequiresReconciliation(oldObj, newObj any) bool {
 	}
 
 	if oldNode.Labels[gpuPresentLabel] != newNode.Labels[gpuPresentLabel] {
+		return true
+	}
+
+	if oldNode.Labels[ManagedLabelKey] != newNode.Labels[ManagedLabelKey] {
 		return true
 	}
 
