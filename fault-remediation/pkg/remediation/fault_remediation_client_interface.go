@@ -49,6 +49,22 @@ type TemplateData struct {
 
 	HealthEvent *protos.HealthEvent
 
+	// CRName is the deterministic CR name for this (nodeName, healthEventID)
+	// pair. For most CRD kinds the existing template-side
+	// `maintenance-{NodeName}-{HealthEventID}` pattern is fine, but the ERR
+	// CRD requires a name that's also a valid Kubernetes taint value
+	// (≤63 chars, [a-z0-9._-]) because the ERR reconciler uses the name as
+	// the value of the release taint. Templates may use this field instead
+	// of inlining the {{ .HealthEvent.NodeName }}-{{ .HealthEventID }} pattern.
+	CRName string
+
+	// HealthEventJSON is the protojson encoding of the HealthEvent. Templates
+	// that need to embed the full event (e.g. ERR's spec.healthEvent) inline
+	// this as a YAML/JSON object value rather than templating every proto
+	// field by hand. Empty for non-ERR actions where the template doesn't
+	// need it.
+	HealthEventJSON string
+
 	// CRD routing metadata (populated from MaintenanceResource)
 	ApiGroup  string
 	Version   string

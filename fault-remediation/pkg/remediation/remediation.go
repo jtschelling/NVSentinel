@@ -17,13 +17,17 @@ package remediation
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"text/template"
 	"time"
 
+	"google.golang.org/protobuf/encoding/protojson"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -175,8 +179,21 @@ func (c *FaultRemediationClient) CreateMaintenanceResource(ctx context.Context, 
 	ctx, span := tracing.StartSpan(ctx, "fault_remediation.create_maintenance_resource")
 	defer span.End()
 
-	// Generate CR name
-	crName := fmt.Sprintf("maintenance-%s-%s", healthEvent.NodeName, healthEventID)
+	// Generate CR name. For most CRD kinds this is informational (the actual
+	// name comes from the rendered template); for ERR the helper produces a
+	// taint-value-safe name that the ERR template later reads from
+	// TemplateData.CRName.
+	recommendedActionForName := model.GetEffectiveActionName(healthEvent)
+
+	resourceForName, ok := c.remediationConfig.RemediationActions[recommendedActionForName]
+	if !ok {
+		// Fall back to the legacy pattern; the downstream
+		// selectRemediationActionAndTemplate will surface the lookup error
+		// with full context.
+		resourceForName = config.MaintenanceResource{}
+	}
+
+	crName := computeCRName(resourceForName, healthEvent.NodeName, healthEventID)
 
 	// Skip custom resource creation if dry-run is enabled
 	if len(c.dryRunMode) > 0 {
@@ -254,7 +271,7 @@ func (c *FaultRemediationClient) CreateMaintenanceResource(ctx context.Context, 
 func templateDataFromEvent(healthEvent *protos.HealthEvent, healthEventID, traceID, spanID, recommendedActionName,
 	impactedEntityScopeValue string, maintenanceResource config.MaintenanceResource,
 ) TemplateData {
-	return TemplateData{
+	td := TemplateData{
 		NodeName:                 healthEvent.NodeName,
 		HealthEventID:            healthEventID,
 		TraceID:                  traceID,
@@ -267,7 +284,126 @@ func templateDataFromEvent(healthEvent *protos.HealthEvent, healthEventID, trace
 		Version:                  maintenanceResource.Version,
 		Kind:                     maintenanceResource.Kind,
 		Namespace:                maintenanceResource.Namespace,
+		CRName:                   computeCRName(maintenanceResource, healthEvent.NodeName, healthEventID),
 	}
+
+	// The ERR template embeds the full HealthEvent inline; render it once via
+	// protojson so the template doesn't need to know every proto field.
+	if isExternalRemediationRequestResource(maintenanceResource) {
+		if jsonBlob, err := protojson.Marshal(healthEvent); err == nil {
+			td.HealthEventJSON = string(jsonBlob)
+		} else {
+			// Falling through with empty HealthEventJSON makes the template fail to
+			// parse cleanly, which surfaces the bug instead of silently creating
+			// an ERR with a missing spec. Log here so the error is observable.
+			slog.Error("failed to marshal HealthEvent via protojson for ERR template",
+				"healthEventID", healthEventID, "node", healthEvent.NodeName, "error", err)
+		}
+	}
+
+	return td
+}
+
+const (
+	// errCRDApiGroup / errCRDKind identify the ExternalRemediationRequest
+	// CRD. They MUST match the values used by the ERR reconciler and the
+	// commons/pkg/managed constants — that match is what lets the ERR
+	// reconciler's apply path use this CR's metadata.name as the release
+	// taint value.
+	errCRDApiGroup = "nvsentinel.nvidia.com"
+	errCRDKind     = "ExternalRemediationRequest"
+
+	// errCRNameMaxLen is the maximum length of an ERR's metadata.name,
+	// bounded by Kubernetes' taint-value rules (label-value semantics:
+	// ≤63 chars, [a-z0-9._-]). The ERR reconciler puts the name in the
+	// release taint's value field, so anything longer would be rejected
+	// by the apiserver at taint-application time.
+	errCRNameMaxLen = 63
+
+	// errCRNamePrefix keeps ERR CR names visually distinct from other
+	// maintenance CRs in `kubectl get` output.
+	errCRNamePrefix = "err-"
+
+	// errCRNameHashLen is the hex-encoded length of the deterministic
+	// suffix appended to keep the name globally unique per
+	// (nodeName, healthEventID) regardless of how much the readable
+	// nodename portion gets truncated.
+	errCRNameHashLen = 8
+)
+
+// isExternalRemediationRequestResource is the dispatch predicate that selects
+// ERR-specific code paths in this package. Kept identical in spelling to the
+// matching predicate in pkg/crstatus so the two stay in lockstep.
+func isExternalRemediationRequestResource(r config.MaintenanceResource) bool {
+	return r.ApiGroup == errCRDApiGroup && r.Kind == errCRDKind
+}
+
+// computeCRName returns the CR's deterministic name. For ERR the name is
+// constrained to the Kubernetes taint-value rules (≤63 chars, [a-z0-9._-])
+// because the ERR reconciler uses it as the release taint's value. For all
+// other CRD kinds we keep the established `maintenance-{nodeName}-{eventID}`
+// pattern so existing templates that hardcode that string keep working.
+func computeCRName(r config.MaintenanceResource, nodeName, healthEventID string) string {
+	if !isExternalRemediationRequestResource(r) {
+		return fmt.Sprintf("maintenance-%s-%s", nodeName, healthEventID)
+	}
+
+	return computeERRName(nodeName, healthEventID)
+}
+
+// computeERRName builds an ERR CR name as
+// "err-<sanitised-truncated-nodename>-<8-hex-hash>" so the result is:
+//
+//   - deterministic given the same (nodeName, healthEventID) pair —
+//     replays produce the same name and the create becomes an idempotent
+//     no-op via apiserver AlreadyExists handling;
+//   - ≤63 chars total, satisfying the taint-value length cap;
+//   - composed only of taint-legal characters ([a-z0-9._-]);
+//   - readable for operator debugging — the truncated nodename tells you
+//     which node is held even when only the taint value is visible.
+func computeERRName(nodeName, healthEventID string) string {
+	hashBytes := sha256.Sum256([]byte(nodeName + "\x00" + healthEventID))
+	hashHex := hex.EncodeToString(hashBytes[:])[:errCRNameHashLen]
+
+	// reserved: prefix + "-" + hash
+	reserved := len(errCRNamePrefix) + 1 + errCRNameHashLen
+	maxNodePart := errCRNameMaxLen - reserved
+
+	nodePart := sanitizeTaintValue(nodeName)
+	if len(nodePart) > maxNodePart {
+		nodePart = nodePart[:maxNodePart]
+	}
+
+	// Trim trailing separators so we don't leave the readable part ending in
+	// "-" or "." (still legal but ugly).
+	nodePart = strings.TrimRight(nodePart, "-._")
+	if nodePart == "" {
+		// Pathological case: a nodename that's entirely non-alphanumeric.
+		// Falling back to just "err-<hash>" still respects the constraints.
+		return errCRNamePrefix + hashHex
+	}
+
+	return errCRNamePrefix + nodePart + "-" + hashHex
+}
+
+// sanitizeTaintValue maps any character outside the taint-value allowlist
+// to "-" so a node name containing e.g. ":" or "/" still produces a valid
+// CR/taint-value name.
+func sanitizeTaintValue(s string) string {
+	var b strings.Builder
+
+	for _, r := range strings.ToLower(s) {
+		switch {
+		case r >= 'a' && r <= 'z',
+			r >= '0' && r <= '9',
+			r == '-', r == '_', r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('-')
+		}
+	}
+
+	return b.String()
 }
 
 // createMaintenanceCR renders the template, sets owner ref, and creates the maintenance CR.
