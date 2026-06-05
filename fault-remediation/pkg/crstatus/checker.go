@@ -92,15 +92,31 @@ func (c *CRStatusChecker) GetCRState(ctx context.Context, actionName string, crN
 func (c *CRStatusChecker) checkCondition(obj *unstructured.Unstructured, resource config.MaintenanceResource) CRState {
 	status, found, err := unstructured.NestedMap(obj.Object, "status")
 	if err != nil || !found {
+		// Fresh-created CR (status not yet populated). For ERR the spec treats
+		// this as "no claim yet" so dedup doesn't block on an uninitialized
+		// object; the deterministic-hash CR name still prevents accidental
+		// duplicates if a create is retried.
+		if isExternalRemediationRequest(resource) {
+			return CRStateNotFound
+		}
+
 		return CRStateInProgress
 	}
 
 	conditions, found, err := unstructured.NestedSlice(status, "conditions")
 	if err != nil || !found {
+		if isExternalRemediationRequest(resource) {
+			return CRStateNotFound
+		}
+
 		return CRStateInProgress
 	}
 
 	conditionStatus := c.findConditionStatus(conditions, resource.CompleteConditionType)
+
+	if isExternalRemediationRequest(resource) {
+		return errStateFromCondition(conditionStatus)
+	}
 
 	switch conditionStatus {
 	case "True":
@@ -108,6 +124,52 @@ func (c *CRStatusChecker) checkCondition(obj *unstructured.Unstructured, resourc
 	case "False":
 		return CRStateFailed
 	default:
+		return CRStateInProgress
+	}
+}
+
+// ExternalRemediationRequest constants mirror the values used by the ERR
+// reconciler and the fault-remediation TOML config entry. The pair is the
+// dispatch key for the asymmetric True/False semantics defined in ADR-040.
+const (
+	errAPIGroup = "nvsentinel.nvidia.com"
+	errKind     = "ExternalRemediationRequest"
+)
+
+// isExternalRemediationRequest reports whether the configured remediation
+// resource targets the ERR CRD. ERR has asymmetric completion semantics
+// per ADR-040, so checkCondition routes it through errStateFromCondition
+// rather than the default True=Succeeded / False=Failed mapping.
+func isExternalRemediationRequest(r config.MaintenanceResource) bool {
+	return r.ApiGroup == errAPIGroup && r.Kind == errKind
+}
+
+// errStateFromCondition implements the ADR-040 asymmetric mapping for the
+// ExternalRemediationComplete condition:
+//
+//   - "True"   -> external system reported success; ERR reconciler is
+//     unwinding the release taint and managed=false label. The
+//     equivalence-group entry should be pruned and a new fault on the same
+//     node is free to create another ERR. -> CRStateNotFound.
+//   - "False"  -> external system reported failure / gave up. The node
+//     remains released and the ERR remains the active claim until an
+//     operator deletes the ERR or the external system retries with True.
+//     -> CRStateInProgress (suppress duplicate creation).
+//   - "Unknown" -> in-flight; release taint may or may not be on the node
+//     yet. -> CRStateInProgress.
+//   - missing  -> ERR exists but its status is empty (race with the
+//     reconciler's first reconcile). Spec calls this out: treat as "no
+//     claim" so dedup doesn't lock on a half-initialised ERR. The
+//     deterministic-hash CR name keeps creation idempotent.
+//     -> CRStateNotFound.
+func errStateFromCondition(conditionStatus string) CRState {
+	switch conditionStatus {
+	case "True", "":
+		return CRStateNotFound
+	case "False", "Unknown":
+		return CRStateInProgress
+	default:
+		// Any unrecognised value (defensive): treat as in-flight.
 		return CRStateInProgress
 	}
 }
