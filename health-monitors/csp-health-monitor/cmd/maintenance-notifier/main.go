@@ -27,6 +27,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
@@ -229,9 +230,16 @@ func run() error {
 
 		slog.Info("Event handling strategy configured", "processingStrategy", appCfg.processingStrategy)
 
+		// Node informer feeds the ADR-040 emission gate (JSC-90). Started here
+		// so the cache primes alongside the maintenance-event poll loop; gate
+		// is fail-open during warmup.
+		nodeFactory := informers.NewSharedInformerFactory(k8sClient, 0)
+		nodeLister := nodeFactory.Core().V1().Nodes().Lister()
+		nodeFactory.Start(gCtx.Done())
+
 		engine := trigger.NewEngine(cfg, store, platformConnectorClient,
 			fmt.Sprintf("unix:%s", appCfg.udsPath),
-			k8sClient, pb.ProcessingStrategy(value))
+			k8sClient, nodeLister, pb.ProcessingStrategy(value))
 
 		slog.Info("Trigger engine starting...")
 		engine.Start(gCtx)

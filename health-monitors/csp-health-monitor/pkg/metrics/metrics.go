@@ -242,4 +242,15 @@ var (
 		},
 		[]string{"node_name"}, // Track which nodes are being monitored
 	)
+
+	// EmissionsSkippedManaged counts maintenance-event triggers dropped because
+	// the target Node carries nvsentinel.dgxc.nvidia.com/managed=false (the
+	// ADR-040 external-remediation opt-out). Labeled by trigger type.
+	EmissionsSkippedManaged = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "csp_health_monitor_emissions_skipped_managed_total",
+			Help: "Health-event emissions skipped because the target node is managed=false",
+		},
+		[]string{"trigger_type"},
+	)
 )

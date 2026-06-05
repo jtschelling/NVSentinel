@@ -27,8 +27,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	listersv1 "k8s.io/client-go/listers/core/v1"
 
 	"github.com/nvidia/nvsentinel/commons/pkg/healthpub"
+	"github.com/nvidia/nvsentinel/commons/pkg/managed"
 	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/config"
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/datastore"
@@ -55,6 +57,11 @@ const (
 
 // Engine polls the datastore for maintenance events and forwards the
 // corresponding health signals to NVSentinel through the UDS connector.
+//
+// Per ADR-040 (JSC-90), emissions are gated on the
+// nvsentinel.dgxc.nvidia.com/managed Node label: events for a node carrying
+// "false" are dropped without contacting the platform connector. nodeLister
+// supplies the cached lookup; a nil lister disables the gate (fail-open).
 type Engine struct {
 	store              datastore.Store
 	udsClient          pb.PlatformConnectorClient
@@ -62,6 +69,7 @@ type Engine struct {
 	config             *config.Config
 	pollInterval       time.Duration
 	k8sClient          kubernetes.Interface
+	nodeLister         listersv1.NodeLister
 	monitoredNodes     sync.Map // Track which nodes are currently being monitored
 	monitorInterval    time.Duration
 	processingStrategy pb.ProcessingStrategy
@@ -70,13 +78,15 @@ type Engine struct {
 // NewEngine constructs a ready-to-run Engine instance. udsTarget must
 // match the gRPC target string used to dial udsClient (typically
 // "unix:/var/run/nvsentinel.sock"); pass "" in tests to disable the
-// healthpub socket-existence gate.
+// healthpub socket-existence gate. nodeLister may be nil in tests; the
+// emission gate then fails open.
 func NewEngine(
 	cfg *config.Config,
 	store datastore.Store,
 	udsClient pb.PlatformConnectorClient,
 	udsTarget string,
 	k8sClient kubernetes.Interface,
+	nodeLister listersv1.NodeLister,
 	processingStrategy pb.ProcessingStrategy,
 ) *Engine {
 	return &Engine{
@@ -87,6 +97,7 @@ func NewEngine(
 			healthpub.WithRetryPolicy(udsMaxRetries, udsRetryDelay, 1.5, 0.1)),
 		pollInterval:       time.Duration(cfg.MaintenanceEventPollIntervalSeconds) * time.Second,
 		k8sClient:          k8sClient,
+		nodeLister:         nodeLister,
 		monitorInterval:    defaultMonitorInterval,
 		processingStrategy: processingStrategy,
 	}
@@ -247,6 +258,25 @@ func (e *Engine) processAndSendTrigger(
 		"type", strings.ToUpper(triggerType),
 		"node", event.NodeName,
 		"eventID", event.EventID)
+
+	if managed.IsNodeOptedOut(ctx, e.nodeLister, event.NodeName) {
+		metrics.EmissionsSkippedManaged.WithLabelValues(triggerType).Inc()
+		slog.Debug("Skipping CSP maintenance event for managed=false node",
+			"triggerType", triggerType,
+			"node", event.NodeName,
+			"eventID", event.EventID)
+
+		// Treat as a successful trigger for the datastore: the event will be
+		// re-considered on the next poll if managed flips back, but we don't
+		// want to re-attempt while the gate is closed.
+		if dbErr := e.store.UpdateEventStatus(ctx, event.EventID, targetDBStatus); dbErr != nil {
+			metrics.TriggerDatastoreUpdateErrors.WithLabelValues(triggerType).Inc()
+
+			return fmt.Errorf("update event status after gate-drop for %s: %w", event.EventID, dbErr)
+		}
+
+		return nil
+	}
 
 	healthEvent, mapErr := e.mapMaintenanceEventToHealthEvent(event, isHealthy, isFatal, message)
 	if mapErr != nil {

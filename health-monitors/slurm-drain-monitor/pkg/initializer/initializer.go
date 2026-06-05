@@ -28,6 +28,8 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/client-go/informers"
+	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -156,7 +158,24 @@ func initConnAndClients(ctx context.Context, params Params) (
 		return nil, nil, nil, nil, fmt.Errorf("failed to create parser: %w", err)
 	}
 
-	pub := publisher.New(pcClient, params.PlatformConnectorSocket, pb.ProcessingStrategy(strategyValue))
+	restCfg := ctrl.GetConfigOrDie()
+
+	k8sClient, err := kubernetes.NewForConfig(restCfg)
+	if err != nil {
+		conn.Close()
+
+		return nil, nil, nil, nil, fmt.Errorf("failed to build kubernetes client: %w", err)
+	}
+
+	// Node informer feeds the publisher's managed=false opt-out gate (ADR-040,
+	// JSC-90). Started below via ctx so the cache primes before emissions
+	// begin; gate is fail-open during warmup.
+	nodeFactory := informers.NewSharedInformerFactory(k8sClient, params.ResyncPeriod)
+	nodeLister := nodeFactory.Core().V1().Nodes().Lister()
+	nodeFactory.Start(ctx.Done())
+
+	pub := publisher.New(pcClient, params.PlatformConnectorSocket,
+		pb.ProcessingStrategy(strategyValue), nodeLister)
 
 	return conn, pr, pub, cfg, nil
 }

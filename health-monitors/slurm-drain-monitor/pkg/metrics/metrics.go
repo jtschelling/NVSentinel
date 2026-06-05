@@ -51,4 +51,14 @@ var (
 		},
 		[]string{"pattern_name"},
 	)
+
+	// EmissionsSkippedManaged counts drain events dropped because the target
+	// Node carries nvsentinel.dgxc.nvidia.com/managed=false (ADR-040 opt-out).
+	EmissionsSkippedManaged = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "slurm_drain_monitor_emissions_skipped_managed_total",
+			Help: "Health-event emissions skipped because the target node is managed=false",
+		},
+		[]string{"node"},
+	)
 )

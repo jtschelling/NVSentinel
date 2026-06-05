@@ -28,6 +28,8 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/informers"
+	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -89,7 +91,25 @@ func InitializeAll(ctx context.Context, params Params) (*Components, error) {
 
 	slog.Info("Event handling strategy configured", "processingStrategy", params.ProcessingStrategy)
 
-	pub := publisher.New(pcClient, params.PlatformConnectorSocket, pb.ProcessingStrategy(strategyValue))
+	restCfg := ctrl.GetConfigOrDie()
+
+	k8sClient, err := kubernetes.NewForConfig(restCfg)
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("failed to build kubernetes client: %w", err)
+	}
+
+	// Node informer feeds the publisher's managed=false opt-out gate (ADR-040,
+	// JSC-90). Starting the factory here primes the cache before the manager
+	// begins reconciling — emission gating is fail-open during warmup
+	// (managed.IsNodeOptedOut returns false when the cache is cold), so
+	// transient warmup races are safe.
+	nodeFactory := informers.NewSharedInformerFactory(k8sClient, params.ResyncPeriod)
+	nodeLister := nodeFactory.Core().V1().Nodes().Lister()
+	nodeFactory.Start(ctx.Done())
+
+	pub := publisher.New(pcClient, params.PlatformConnectorSocket,
+		pb.ProcessingStrategy(strategyValue), nodeLister)
 
 	mgr, err := createManager(params)
 	if err != nil {

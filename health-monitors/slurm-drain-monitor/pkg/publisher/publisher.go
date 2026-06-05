@@ -17,12 +17,16 @@ package publisher
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"google.golang.org/protobuf/types/known/timestamppb"
+	listersv1 "k8s.io/client-go/listers/core/v1"
 
 	"github.com/nvidia/nvsentinel/commons/pkg/healthpub"
+	"github.com/nvidia/nvsentinel/commons/pkg/managed"
 	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
+	"github.com/nvidia/nvsentinel/health-monitors/slurm-drain-monitor/pkg/metrics"
 	"github.com/nvidia/nvsentinel/health-monitors/slurm-drain-monitor/pkg/parser"
 )
 
@@ -32,17 +36,27 @@ const (
 
 // Publisher publishes health events to the platform connector via the
 // shared healthpub publisher (commons/pkg/healthpub).
+//
+// Per ADR-040 (JSC-90), emission is gated on the
+// nvsentinel.dgxc.nvidia.com/managed label: events targeting a Node with
+// "false" are dropped without contacting the platform connector. Observation
+// of the underlying drained pods is unaffected.
 type Publisher struct {
 	pub                *healthpub.Publisher
 	processingStrategy pb.ProcessingStrategy
+	nodeLister         listersv1.NodeLister
 }
 
 // New creates a Publisher. target must match the gRPC target string
 // used to dial client (typically "unix:///var/run/nvsentinel.sock").
-func New(client pb.PlatformConnectorClient, target string, processingStrategy pb.ProcessingStrategy) *Publisher {
+// nodeLister is consulted before every emission to honour the ADR-040
+// managed=false opt-out. A nil lister disables the gate (fail-open).
+func New(client pb.PlatformConnectorClient, target string, processingStrategy pb.ProcessingStrategy,
+	nodeLister listersv1.NodeLister) *Publisher {
 	return &Publisher{
 		pub:                healthpub.New(client, target, agentName),
 		processingStrategy: processingStrategy,
+		nodeLister:         nodeLister,
 	}
 }
 
@@ -52,6 +66,14 @@ func (p *Publisher) PublishDrainEvents(
 	ctx context.Context, reasons []parser.MatchedReason, nodeName string,
 	isHealthy bool, podNamespace, podName string,
 ) error {
+	if managed.IsNodeOptedOut(ctx, p.nodeLister, nodeName) {
+		metrics.EmissionsSkippedManaged.WithLabelValues(nodeName).Inc()
+		slog.Debug("Skipping drain events for managed=false node",
+			"node", nodeName, "pod", fmt.Sprintf("%s/%s", podNamespace, podName))
+
+		return nil
+	}
+
 	entityValue := podName
 	if podNamespace != "" {
 		entityValue = fmt.Sprintf("%s/%s", podNamespace, podName)

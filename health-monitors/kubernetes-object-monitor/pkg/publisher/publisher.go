@@ -20,10 +20,13 @@ import (
 	"time"
 
 	"google.golang.org/protobuf/types/known/timestamppb"
+	listersv1 "k8s.io/client-go/listers/core/v1"
 
 	"github.com/nvidia/nvsentinel/commons/pkg/healthpub"
+	"github.com/nvidia/nvsentinel/commons/pkg/managed"
 	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/health-monitors/kubernetes-object-monitor/pkg/config"
+	"github.com/nvidia/nvsentinel/health-monitors/kubernetes-object-monitor/pkg/metrics"
 )
 
 const (
@@ -32,17 +35,29 @@ const (
 
 // Publisher publishes health events to the platform connector via the
 // shared healthpub publisher (commons/pkg/healthpub).
+//
+// Per ADR-040 the emission path is gated on the nvsentinel.dgxc.nvidia.com/managed
+// label: when a Node carries "false", the operator has handed it to an
+// external system and this monitor must stop emitting events targeting it.
+// The check sits at emission time (not at observation time) so we keep
+// historical visibility into what was happening on a released node.
 type Publisher struct {
 	pub                *healthpub.Publisher
 	processingStrategy pb.ProcessingStrategy
+	nodeLister         listersv1.NodeLister
 }
 
 // New constructs a Publisher. target must match the gRPC target string
 // used to dial client (typically "unix:///var/run/nvsentinel.sock").
-func New(client pb.PlatformConnectorClient, target string, processingStrategy pb.ProcessingStrategy) *Publisher {
+// nodeLister is consulted on every PublishHealthEvent to honour the
+// managed=false opt-out from ADR-040. A nil lister disables the gate
+// (fail-open) which is the right default during early startup.
+func New(client pb.PlatformConnectorClient, target string, processingStrategy pb.ProcessingStrategy,
+	nodeLister listersv1.NodeLister) *Publisher {
 	return &Publisher{
 		pub:                healthpub.New(client, target, agentName),
 		processingStrategy: processingStrategy,
+		nodeLister:         nodeLister,
 	}
 }
 
@@ -51,6 +66,14 @@ func New(client pb.PlatformConnectorClient, target string, processingStrategy pb
 // which allows fault-quarantine to track each resource individually.
 func (p *Publisher) PublishHealthEvent(ctx context.Context,
 	policy *config.Policy, nodeName string, isHealthy bool, resourceInfo *config.ResourceInfo) error {
+	if managed.IsNodeOptedOut(ctx, p.nodeLister, nodeName) {
+		metrics.EmissionsSkippedManaged.WithLabelValues(policy.Name).Inc()
+		slog.Debug("Skipping health event for managed=false node",
+			"node", nodeName, "policy", policy.Name)
+
+		return nil
+	}
+
 	strategy := p.processingStrategy
 
 	if policy.HealthEvent.ProcessingStrategy != "" {

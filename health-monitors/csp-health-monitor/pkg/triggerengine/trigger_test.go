@@ -29,12 +29,32 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/informers"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
+	listersv1 "k8s.io/client-go/listers/core/v1"
 
+	"github.com/nvidia/nvsentinel/commons/pkg/managed"
 	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/config"
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/model"
 )
+
+// nodeListerWith builds an informer-backed NodeLister pre-populated with the
+// given Nodes for the gate tests.
+func nodeListerWith(t *testing.T, nodes ...*corev1.Node) listersv1.NodeLister {
+	t.Helper()
+
+	factory := informers.NewSharedInformerFactory(k8sfake.NewSimpleClientset(), 0)
+	informer := factory.Core().V1().Nodes().Informer()
+
+	for _, n := range nodes {
+		if err := informer.GetStore().Add(n); err != nil {
+			t.Fatalf("nodeListerWith: %v", err)
+		}
+	}
+
+	return factory.Core().V1().Nodes().Lister()
+}
 
 type MockDatastore struct {
 	mock.Mock
@@ -189,7 +209,7 @@ func TestNewEngine(t *testing.T) {
 	mUDSClient := new(MockUDSClient)
 	mockClient := createMockClientWithReadyNodes()
 
-	engine := NewEngine(cfg, mStore, mUDSClient, "tcp://test", mockClient, pb.ProcessingStrategy_EXECUTE_REMEDIATION)
+	engine := NewEngine(cfg, mStore, mUDSClient, "tcp://test", mockClient, nil, pb.ProcessingStrategy_EXECUTE_REMEDIATION)
 
 	assert.NotNil(t, engine)
 	assert.Equal(t, cfg, engine.config)
@@ -203,7 +223,7 @@ func TestMapMaintenanceEventToHealthEvent(t *testing.T) {
 	cfg := newTestConfig()
 	mStore := new(MockDatastore)     // Not strictly needed for this func, but engine needs it
 	mUDSClient := new(MockUDSClient) // Not strictly needed for this func, but engine needs it
-	engine := NewEngine(cfg, mStore, mUDSClient, "tcp://test", nil, pb.ProcessingStrategy_EXECUTE_REMEDIATION)
+	engine := NewEngine(cfg, mStore, mUDSClient, "tcp://test", nil, nil, pb.ProcessingStrategy_EXECUTE_REMEDIATION)
 
 	tests := []struct {
 		name          string
@@ -566,7 +586,7 @@ func TestProcessAndSendTrigger(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			mStore := new(MockDatastore)
 			mUDSClient := new(MockUDSClient)
-			engine := NewEngine(cfg, mStore, mUDSClient, "tcp://test", nil, pb.ProcessingStrategy_EXECUTE_REMEDIATION)
+			engine := NewEngine(cfg, mStore, mUDSClient, "tcp://test", nil, nil, pb.ProcessingStrategy_EXECUTE_REMEDIATION)
 
 			tc.setupMocks(mStore, mUDSClient, tc.event, tc.targetDBStatus)
 
@@ -747,7 +767,7 @@ func TestCheckAndTriggerEvents(t *testing.T) {
 			mStore := new(MockDatastore)
 			mUDSClient := new(MockUDSClient)
 			mockClient := createMockClientWithReadyNodes("node-q1", "node-h1", "q-no-node")
-			engine := NewEngine(cfg, mStore, mUDSClient, "tcp://test", mockClient, pb.ProcessingStrategy_EXECUTE_REMEDIATION)
+			engine := NewEngine(cfg, mStore, mUDSClient, "tcp://test", mockClient, nil, pb.ProcessingStrategy_EXECUTE_REMEDIATION)
 
 			if tc.setupMocks != nil {
 				tc.setupMocks(mStore, mUDSClient)
@@ -793,7 +813,7 @@ func TestHealthyTriggerWaitsForNodeReady(t *testing.T) {
 	mUDSClient.On("HealthEventOccurredV1", mock.Anything, mock.Anything, mock.Anything).Return(&emptypb.Empty{}, nil).Once()
 	mStore.On("UpdateEventStatus", mock.AnythingOfType("*context.timerCtx"), healthyEvent.EventID, model.StatusHealthyTriggered).Return(nil).Once()
 
-	engine := NewEngine(cfg, mStore, mUDSClient, "tcp://test", mockClient, pb.ProcessingStrategy_EXECUTE_REMEDIATION)
+	engine := NewEngine(cfg, mStore, mUDSClient, "tcp://test", mockClient, nil, pb.ProcessingStrategy_EXECUTE_REMEDIATION)
 	engine.monitorInterval = 3 * time.Second
 
 	err := engine.checkAndTriggerEvents(ctx)
@@ -815,4 +835,84 @@ func TestHealthyTriggerWaitsForNodeReady(t *testing.T) {
 
 	mUDSClient.AssertExpectations(t)
 	mStore.AssertExpectations(t)
+}
+
+// TestProcessAndSendTrigger_GatedOnManagedFalse covers the ADR-040 / JSC-90
+// emission gate at the engine level: when the target Node carries
+// nvsentinel.dgxc.nvidia.com/managed=false, processAndSendTrigger must drop
+// the trigger without calling the UDS connector, while still updating the
+// datastore so the event is not retried in a tight loop.
+func TestProcessAndSendTrigger_GatedOnManagedFalse(t *testing.T) {
+	ctx := context.Background()
+	cfg := newTestConfig()
+	event := model.MaintenanceEvent{
+		EventID: "evt-gate-1", NodeName: "opted-out", ResourceType: "test", ResourceID: "rid",
+		RecommendedAction: pb.RecommendedAction_NONE.String(),
+	}
+
+	t.Run("managed=false drops emission, datastore still updated", func(t *testing.T) {
+		mStore := new(MockDatastore)
+		mUDSClient := new(MockUDSClient)
+		mockClient := createMockClientWithReadyNodes(event.NodeName)
+		lister := nodeListerWith(t, &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   event.NodeName,
+				Labels: map[string]string{managed.ManagedLabelKey: managed.ManagedLabelValueFalse},
+			},
+		})
+
+		engine := NewEngine(cfg, mStore, mUDSClient, "tcp://test", mockClient, lister, pb.ProcessingStrategy_EXECUTE_REMEDIATION)
+
+		// Datastore status update MUST still happen (gate-drop is treated as
+		// a successful trigger from the datastore's perspective).
+		mStore.On("UpdateEventStatus", ctx, event.EventID, model.StatusQuarantineTriggered).Return(nil).Once()
+
+		err := engine.processAndSendTrigger(ctx, event, quarantineTriggerType, false, true,
+			maintenanceScheduledMessage, model.StatusQuarantineTriggered)
+		assert.NoError(t, err)
+
+		// UDS connector must NOT have been called.
+		mUDSClient.AssertNotCalled(t, "HealthEventOccurredV1", mock.Anything, mock.Anything, mock.Anything)
+		mStore.AssertExpectations(t)
+	})
+
+	t.Run("managed absent emits normally", func(t *testing.T) {
+		mStore := new(MockDatastore)
+		mUDSClient := new(MockUDSClient)
+		mockClient := createMockClientWithReadyNodes(event.NodeName)
+		lister := nodeListerWith(t, &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: event.NodeName},
+		})
+
+		engine := NewEngine(cfg, mStore, mUDSClient, "tcp://test", mockClient, lister, pb.ProcessingStrategy_EXECUTE_REMEDIATION)
+
+		mUDSClient.On("HealthEventOccurredV1", mock.Anything, mock.Anything, mock.Anything).Return(&emptypb.Empty{}, nil).Once()
+		mStore.On("UpdateEventStatus", mock.Anything, event.EventID, model.StatusQuarantineTriggered).Return(nil).Once()
+
+		err := engine.processAndSendTrigger(ctx, event, quarantineTriggerType, false, true,
+			maintenanceScheduledMessage, model.StatusQuarantineTriggered)
+		assert.NoError(t, err)
+
+		mUDSClient.AssertExpectations(t)
+		mStore.AssertExpectations(t)
+	})
+
+	t.Run("unknown node fails open (cache cold) and emits", func(t *testing.T) {
+		mStore := new(MockDatastore)
+		mUDSClient := new(MockUDSClient)
+		mockClient := createMockClientWithReadyNodes(event.NodeName)
+		lister := nodeListerWith(t) // empty cache
+
+		engine := NewEngine(cfg, mStore, mUDSClient, "tcp://test", mockClient, lister, pb.ProcessingStrategy_EXECUTE_REMEDIATION)
+
+		mUDSClient.On("HealthEventOccurredV1", mock.Anything, mock.Anything, mock.Anything).Return(&emptypb.Empty{}, nil).Once()
+		mStore.On("UpdateEventStatus", mock.Anything, event.EventID, model.StatusQuarantineTriggered).Return(nil).Once()
+
+		err := engine.processAndSendTrigger(ctx, event, quarantineTriggerType, false, true,
+			maintenanceScheduledMessage, model.StatusQuarantineTriggered)
+		assert.NoError(t, err)
+
+		mUDSClient.AssertExpectations(t)
+		mStore.AssertExpectations(t)
+	})
 }

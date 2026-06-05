@@ -51,4 +51,16 @@ var (
 		},
 		[]string{"resource_kind", "error_type"},
 	)
+
+	// EmissionsSkippedManaged counts emissions dropped because the target
+	// Node carries nvsentinel.dgxc.nvidia.com/managed=false (the ADR-040
+	// external-remediation opt-out). Labeled by policy name so operators can
+	// see which checks are being silenced.
+	EmissionsSkippedManaged = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "k8s_object_monitor_emissions_skipped_managed_total",
+			Help: "Health-event emissions skipped because the target node is managed=false",
+		},
+		[]string{"policy_name"},
+	)
 )
