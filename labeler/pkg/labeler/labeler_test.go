@@ -850,6 +850,163 @@ func TestKataLabelOverrideIsolation(t *testing.T) {
 }
 
 // TestKataLabelDetection tests that the labeler correctly detects and sets kata labels on nodes
+// TestGateOnManaged covers the managed=false short-circuit in isolation.
+// It does not need envtest; gateOnManaged operates purely on the in-memory
+// Node label map.
+func TestGateOnManaged(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		labels         map[string]string
+		wantGated      bool
+		wantNeedsPatch bool
+		wantLabels     map[string]string // expected labels after gateOnManaged runs
+	}{
+		{
+			name:           "managed=false strips all three detection labels",
+			labels:         map[string]string{ManagedLabelKey: "false", DCGMVersionLabel: "4.x", DriverInstalledLabel: "true", KataEnabledLabel: "true"},
+			wantGated:      true,
+			wantNeedsPatch: true,
+			wantLabels:     map[string]string{ManagedLabelKey: "false"},
+		},
+		{
+			name:           "managed=false strips only the present subset",
+			labels:         map[string]string{ManagedLabelKey: "false", DCGMVersionLabel: "4.x"},
+			wantGated:      true,
+			wantNeedsPatch: true,
+			wantLabels:     map[string]string{ManagedLabelKey: "false"},
+		},
+		{
+			name:           "managed=false on a clean node is a gated no-op",
+			labels:         map[string]string{ManagedLabelKey: "false"},
+			wantGated:      true,
+			wantNeedsPatch: false,
+			wantLabels:     map[string]string{ManagedLabelKey: "false"},
+		},
+		{
+			name:           "managed=false preserves unrelated labels",
+			labels:         map[string]string{ManagedLabelKey: "false", DCGMVersionLabel: "4.x", "foo": "bar", "node-role.kubernetes.io/agent": ""},
+			wantGated:      true,
+			wantNeedsPatch: true,
+			wantLabels:     map[string]string{ManagedLabelKey: "false", "foo": "bar", "node-role.kubernetes.io/agent": ""},
+		},
+		{
+			name:           "managed=true is NOT gated (normal stamping proceeds)",
+			labels:         map[string]string{ManagedLabelKey: "true", DCGMVersionLabel: "4.x"},
+			wantGated:      false,
+			wantNeedsPatch: false,
+			wantLabels:     map[string]string{ManagedLabelKey: "true", DCGMVersionLabel: "4.x"},
+		},
+		{
+			name:           "managed label absent is NOT gated",
+			labels:         map[string]string{DCGMVersionLabel: "4.x"},
+			wantGated:      false,
+			wantNeedsPatch: false,
+			wantLabels:     map[string]string{DCGMVersionLabel: "4.x"},
+		},
+		{
+			name:           "managed=<typo> is NOT gated (defensive: only the canonical false value opts out)",
+			labels:         map[string]string{ManagedLabelKey: "False", DCGMVersionLabel: "4.x"},
+			wantGated:      false,
+			wantNeedsPatch: false,
+			wantLabels:     map[string]string{ManagedLabelKey: "False", DCGMVersionLabel: "4.x"},
+		},
+		{
+			name:           "nil labels map is NOT gated",
+			labels:         nil,
+			wantGated:      false,
+			wantNeedsPatch: false,
+			wantLabels:     nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			node := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:   "test-node",
+					Labels: tt.labels,
+				},
+			}
+
+			gated, needsUpdate := gateOnManaged(node)
+			assert.Equal(t, tt.wantGated, gated, "gated")
+			assert.Equal(t, tt.wantNeedsPatch, needsUpdate, "needsUpdate")
+			assert.Equal(t, tt.wantLabels, node.Labels, "Node labels after gate")
+		})
+	}
+}
+
+// TestManagedFalseRemovesDetectionLabelsViaHandleNodeEvent is the
+// integration sibling of TestGateOnManaged. It runs the full handleNodeEvent
+// path against envtest to verify the gate actually persists the label
+// removal through the apiserver — i.e. that updateNodeLabels short-circuits
+// onto the Update path when the gate fires.
+func TestManagedFalseRemovesDetectionLabelsViaHandleNodeEvent(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	testEnv := envtest.Environment{}
+
+	cfg, err := testEnv.Start()
+	require.NoError(t, err, "failed to setup envtest")
+
+	defer func() { _ = testEnv.Stop() }()
+
+	cli, err := kubernetes.NewForConfig(cfg)
+	require.NoError(t, err)
+
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "managed-false-node",
+			Labels: map[string]string{
+				ManagedLabelKey:      ManagedLabelValueFalse,
+				DCGMVersionLabel:     "4.x",
+				DriverInstalledLabel: "true",
+				KataEnabledLabel:     "true",
+				"unrelated":          "preserved",
+			},
+		},
+	}
+	_, err = cli.CoreV1().Nodes().Create(ctx, node, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	labeler, err := NewLabeler(cli, time.Minute,
+		"nvidia-dcgm", "nvidia-driver-daemonset", "nvidia-driver-installer", "", false)
+	require.NoError(t, err)
+
+	labelerCtx, labelerCancel := context.WithCancel(ctx)
+	defer labelerCancel()
+
+	go func() { _ = labeler.Run(labelerCtx) }()
+
+	require.Eventually(t, func() bool {
+		return labeler.allInformersSynced()
+	}, 10*time.Second, 100*time.Millisecond, "informers did not sync")
+
+	require.NoError(t, labeler.handleNodeEvent(node))
+
+	require.Eventually(t, func() bool {
+		got, err := cli.CoreV1().Nodes().Get(ctx, node.Name, metav1.GetOptions{})
+		if err != nil {
+			return false
+		}
+
+		for _, k := range []string{DCGMVersionLabel, DriverInstalledLabel, KataEnabledLabel} {
+			if _, present := got.Labels[k]; present {
+				return false
+			}
+		}
+		// Unrelated label must survive; managed=false stays.
+		return got.Labels[ManagedLabelKey] == ManagedLabelValueFalse &&
+			got.Labels["unrelated"] == "preserved"
+	}, 10*time.Second, 200*time.Millisecond,
+		"managed=false node must lose its three detection labels but keep unrelated labels")
+}
+
 func TestKataLabelDetection(t *testing.T) {
 	tests := []struct {
 		name            string

@@ -40,6 +40,17 @@ const (
 	KataEnabledLabel        = "nvsentinel.dgxc.nvidia.com/kata.enabled"
 	KataRuntimeDefaultLabel = "katacontainers.io/kata-runtime"
 
+	// ManagedLabelKey is the cluster-wide opt-out label written by the ERR
+	// reconciler when releasing a Node to an external system. node-labeler
+	// reads it (never writes it). When the value is "false", node-labeler
+	// strips detection labels so DaemonSet monitors evict naturally via
+	// their existing nodeSelectors.
+	//
+	// Centralised in commons/pkg/managed by JSC-88 once that lands; defined
+	// locally here so JSC-89 doesn't block on JSC-88.
+	ManagedLabelKey        = "nvsentinel.dgxc.nvidia.com/managed"
+	ManagedLabelValueFalse = "false"
+
 	NodeDCGMIndex               = "nodeDCGM"
 	NodeDriverIndex             = "nodeDriver"
 	NodeGKEDriverInstallerIndex = "nodeGKEDriverInstaller"
@@ -48,6 +59,48 @@ const (
 	LabelValueTrue  = "true"
 	LabelValueFalse = "false"
 )
+
+// detectionLabels are the labels node-labeler stamps based on its probes.
+// gateOnManaged strips any of these that are present when managed=false.
+// Keep the list co-located with the constants so additions don't drift.
+var detectionLabels = []string{
+	DCGMVersionLabel,
+	DriverInstalledLabel,
+	KataEnabledLabel,
+}
+
+// gateOnManaged implements the ADR-040 contract for node-labeler: if the
+// Node carries nvsentinel.dgxc.nvidia.com/managed="false", the detection
+// labels we stamp must be absent. Returns (gated, needsUpdate):
+//
+//   - gated=true means the caller must NOT proceed with normal detection-
+//     label stamping; the node is opted out. The caller's only remaining
+//     work is the Update to persist whatever this helper removed.
+//   - needsUpdate=true means the helper actually removed at least one label
+//     from node.Labels and the caller should issue an Update.
+//
+// When gated=true and needsUpdate=false, the caller can return early — the
+// node is opted out and already clean.
+//
+// node-labeler intentionally does NOT respond to managed values other than
+// "false". Any other value (absent, "true", or anything else) is treated as
+// "manage normally" so a typo or stale value doesn't accidentally release
+// a Node from observation.
+func gateOnManaged(node *v1.Node) (gated, needsUpdate bool) {
+	if node.Labels[ManagedLabelKey] != ManagedLabelValueFalse {
+		return false, false
+	}
+
+	for _, key := range detectionLabels {
+		if _, present := node.Labels[key]; present {
+			delete(node.Labels, key)
+
+			needsUpdate = true
+		}
+	}
+
+	return true, needsUpdate
+}
 
 var (
 	dcgm4Regex = regexp.MustCompile(`.*dcgm:4\..*`)
@@ -570,6 +623,22 @@ func (l *Labeler) updateNodeLabelsForPod(nodeName, expectedDCGMVersion, expected
 			node.Labels = make(map[string]string)
 		}
 
+		// Honor managed=false: strip any detection labels we previously stamped,
+		// then skip the rest. Pod-driven recalculation must not re-stamp on an
+		// opted-out node.
+		if gated, needsUpdate := gateOnManaged(node); gated {
+			if !needsUpdate {
+				slog.Debug("Node is managed=false; detection labels already absent", "node", nodeName)
+				return nil
+			}
+
+			slog.Info("Node is managed=false; removing detection labels", "node", nodeName)
+
+			_, err = l.clientset.CoreV1().Nodes().Update(l.ctx, node, metav1.UpdateOptions{})
+
+			return err
+		}
+
 		needsUpdate := false
 
 		if node.Labels[DCGMVersionLabel] != expectedDCGMVersion {
@@ -662,6 +731,17 @@ func (l *Labeler) updateNodeLabels(nodeName string) error {
 }
 
 func (l *Labeler) reconcileNodeLabelsInPlace(node *v1.Node, driverLabel, dcgmVersion string) bool {
+	// Honor managed=false: an opted-out node must have no detection labels.
+	// Short-circuit before any stamping work; gateOnManaged also strips any
+	// labels that linger from before the opt-out.
+	if gated, needsUpdate := gateOnManaged(node); gated {
+		if needsUpdate {
+			slog.Info("Node is managed=false; removing detection labels", "node", node.Name)
+		}
+
+		return needsUpdate
+	}
+
 	needsUpdate := false
 
 	expectedKataLabel := l.getKataLabelForNode(node)
