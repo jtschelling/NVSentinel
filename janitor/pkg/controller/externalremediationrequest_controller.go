@@ -19,8 +19,10 @@ import (
 	"fmt"
 	"log/slog"
 	"reflect"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -59,6 +61,34 @@ const (
 	// reasonAwaitingExternalSystem is the initial reason for
 	// ExternalRemediationComplete.
 	reasonAwaitingExternalSystem = "AwaitingExternalSystem"
+
+	// ReleaseTaintKey is the key of the taint the reconciler applies to a Node
+	// to release it from NVSentinel ownership. The taint's value carries the
+	// owning ERR's metadata.name so operators can discover which ERR holds the
+	// node via `kubectl describe node` without consulting separate annotations.
+	// Per ADR-040.
+	ReleaseTaintKey = "nvsentinel.nvidia.com/external-remediation"
+
+	// ManagedLabelKey is the Node label that gates NVSentinel cluster-scope
+	// emission and node-labeler detection-label stamping. A value of "false"
+	// means external systems own the node; absence means NVSentinel owns it.
+	// Centralised in commons/pkg/managed by JSC-88 once that lands; defined
+	// locally here so the apply path doesn't block on it.
+	ManagedLabelKey = "nvsentinel.dgxc.nvidia.com/managed"
+
+	// ManagedLabelValueFalse is the value of ManagedLabelKey when external
+	// systems own the node.
+	ManagedLabelValueFalse = "false"
+
+	// ReasonReleaseTaintApplied is the NVSentinelOwnershipReleased=True
+	// reason set after the release taint and managed=false label land.
+	ReasonReleaseTaintApplied = "ReleaseTaintApplied"
+
+	// ReasonReleaseTaintFailed is the NVSentinelOwnershipReleased=False
+	// reason set when the apply path cannot complete — RBAC forbidden, taint
+	// drift (a taint with our key but a different value), or a missing
+	// healthEvent.nodeName.
+	ReasonReleaseTaintFailed = "ReleaseTaintFailed"
 )
 
 // ExternalRemediationRequestReconciler reconciles ExternalRemediationRequest
@@ -76,6 +106,7 @@ type ExternalRemediationRequestReconciler struct {
 // +kubebuilder:rbac:groups=nvsentinel.nvidia.com,resources=externalremediationrequests,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=nvsentinel.nvidia.com,resources=externalremediationrequests/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvsentinel.nvidia.com,resources=externalremediationrequests/finalizers,verbs=update
+// +kubebuilder:rbac:groups=core,resources=nodes,verbs=get;list;watch;patch
 
 // Reconcile drives the ERR through its lifecycle. This slice ensures the
 // cleanup finalizer is present and the initial Unknown conditions are written;
@@ -181,11 +212,12 @@ func (r *ExternalRemediationRequestReconciler) setInitialConditions(
 }
 
 // dispatch is the six-branch state machine described in ADR-040. Branch 1
-// (initialization) is handled before dispatch is called; branches 2-5 are
-// stubs that subsequent slices fill in. Branch 6 catches the steady-state
-// "released, awaiting external system" case where there is nothing to do.
+// (initialization) is handled before dispatch is called; branches 2, 4, and 5
+// remain stubs filled in by subsequent slices. Branch 3 (apply path) is
+// implemented in reconcileApply. Branch 6 catches the steady-state "released,
+// awaiting external system" case where there is nothing to do.
 func (r *ExternalRemediationRequestReconciler) dispatch(
-	_ context.Context, errObj *nvsentinelv1.ExternalRemediationRequest,
+	ctx context.Context, errObj *nvsentinelv1.ExternalRemediationRequest,
 ) (ctrl.Result, error) {
 	conds := statusConditions(errObj)
 
@@ -195,8 +227,8 @@ func (r *ExternalRemediationRequestReconciler) dispatch(
 		return ctrl.Result{}, nil
 
 	case isConditionStatus(conds, ConditionNVSentinelOwnershipReleased, metav1.ConditionUnknown):
-		// Branch 3: apply path (release taint + managed=false). Filled in by the apply-path slice.
-		return ctrl.Result{}, nil
+		// Branch 3: apply path — release taint + managed=false label, single PATCH.
+		return r.reconcileApply(ctx, errObj)
 
 	case meta.IsStatusConditionTrue(conds, ConditionExternalRemediationComplete):
 		// Branch 4: external system signalled success — run cleanup. Filled in by the resolution-paths slice.
@@ -210,6 +242,146 @@ func (r *ExternalRemediationRequestReconciler) dispatch(
 		// Branch 6: released and waiting on the external system. Nothing to do.
 		return ctrl.Result{}, nil
 	}
+}
+
+// nodeMissingRequeue is how long to wait before re-checking a Node that
+// doesn't yet exist on the apiserver. The Node may show up shortly (cluster
+// autoscaler, kubelet registration) so we don't immediately fail the ERR.
+const nodeMissingRequeue = 30 * time.Second
+
+// reconcileApply implements branch 3: drive a fresh ERR (NVSentinelOwnershipReleased=Unknown)
+// to the released state by applying the release taint and managed=false label in a single
+// strategic-merge PATCH on the target Node, then transitioning the condition to True.
+//
+// Failure modes per ADR-040:
+//
+//   - Empty spec.healthEvent.nodeName — admission webhook should catch this, but if it slips
+//     through, transition to False (persistent; not a controller-side problem to retry).
+//   - Node not found — transient. Leave the condition Unknown and requeue; the Node may show
+//     up shortly via cluster autoscaler or kubelet registration.
+//   - Existing taint with this ERR's name as value — already-applied. Skip the PATCH and
+//     transition to True; this handles the case where a prior reconcile patched the node but
+//     failed to update the condition (e.g. the controller crashed between PATCH and Status().Patch).
+//   - Existing taint with a different value — drift. Some other ERR owns the node. Transition
+//     to False; the operator must `kubectl delete err <other-name>` to release ownership.
+//   - Forbidden — persistent RBAC denial. Transition to False so the operator sees the failure;
+//     controller-runtime backoff cannot fix RBAC.
+//   - Any other apiserver error — transient. Return the error so controller-runtime backs off.
+func (r *ExternalRemediationRequestReconciler) reconcileApply(
+	ctx context.Context, errObj *nvsentinelv1.ExternalRemediationRequest,
+) (ctrl.Result, error) {
+	nodeName := ""
+	if errObj.Spec != nil && errObj.Spec.HealthEvent != nil {
+		nodeName = errObj.Spec.HealthEvent.NodeName
+	}
+
+	if nodeName == "" {
+		return ctrl.Result{}, r.transitionReleased(ctx, errObj, metav1.ConditionFalse, ReasonReleaseTaintFailed,
+			"ExternalRemediationRequest.spec.healthEvent.nodeName is empty; cannot apply release taint")
+	}
+
+	var node corev1.Node
+	if err := r.Get(ctx, client.ObjectKey{Name: nodeName}, &node); err != nil {
+		if apierrors.IsNotFound(err) {
+			slog.WarnContext(ctx, "target node not found; requeueing",
+				"err", errObj.Name, "node", nodeName, "requeueAfter", nodeMissingRequeue)
+
+			return ctrl.Result{RequeueAfter: nodeMissingRequeue}, nil
+		}
+
+		return ctrl.Result{}, fmt.Errorf("get node %q for ERR %q: %w", nodeName, errObj.Name, err)
+	}
+
+	if existing := findTaintByKey(node.Spec.Taints, ReleaseTaintKey); existing != nil {
+		if existing.Value != errObj.Name {
+			msg := fmt.Sprintf(
+				"node %q already tainted by ExternalRemediationRequest %q; another ERR owns this node",
+				nodeName, existing.Value)
+			slog.WarnContext(ctx, "release taint drift detected",
+				"err", errObj.Name, "node", nodeName, "existing_owner", existing.Value)
+
+			return ctrl.Result{}, r.transitionReleased(ctx, errObj, metav1.ConditionFalse, ReasonReleaseTaintFailed, msg)
+		}
+		// Taint already in place with our name — verify the label is also present,
+		// then transition the condition without issuing a redundant PATCH.
+		if node.Labels[ManagedLabelKey] == ManagedLabelValueFalse {
+			slog.InfoContext(ctx, "release taint and managed=false label already in place; transitioning condition",
+				"err", errObj.Name, "node", nodeName)
+
+			return ctrl.Result{}, r.transitionReleased(ctx, errObj, metav1.ConditionTrue, ReasonReleaseTaintApplied,
+				fmt.Sprintf("release taint %s=%s and managed=false label already present on node %q",
+					ReleaseTaintKey, errObj.Name, nodeName))
+		}
+		// Taint is right but the label is missing — patch only the label below.
+	}
+
+	nodeToUpdate := node.DeepCopy()
+
+	if findTaintByKey(nodeToUpdate.Spec.Taints, ReleaseTaintKey) == nil {
+		nodeToUpdate.Spec.Taints = append(nodeToUpdate.Spec.Taints, corev1.Taint{
+			Key:    ReleaseTaintKey,
+			Value:  errObj.Name,
+			Effect: corev1.TaintEffectNoSchedule,
+		})
+	}
+
+	if nodeToUpdate.Labels == nil {
+		nodeToUpdate.Labels = map[string]string{}
+	}
+
+	nodeToUpdate.Labels[ManagedLabelKey] = ManagedLabelValueFalse
+
+	if err := r.Patch(ctx, nodeToUpdate, client.StrategicMergeFrom(&node)); err != nil {
+		if apierrors.IsForbidden(err) {
+			msg := fmt.Sprintf("forbidden to patch node %q: %v", nodeName, err)
+			slog.ErrorContext(ctx, "release taint apply forbidden by RBAC", "err", errObj.Name, "node", nodeName, "error", err)
+
+			return ctrl.Result{}, r.transitionReleased(ctx, errObj, metav1.ConditionFalse, ReasonReleaseTaintFailed, msg)
+		}
+
+		return ctrl.Result{}, fmt.Errorf("patch node %q with release taint + managed=false: %w", nodeName, err)
+	}
+
+	slog.InfoContext(ctx, "applied release taint and managed=false label to node",
+		"err", errObj.Name, "node", nodeName)
+
+	return ctrl.Result{}, r.transitionReleased(ctx, errObj, metav1.ConditionTrue, ReasonReleaseTaintApplied,
+		fmt.Sprintf("applied release taint %s=%s and managed=false label to node %q",
+			ReleaseTaintKey, errObj.Name, nodeName))
+}
+
+// findTaintByKey returns a pointer to the first taint with the given key, or
+// nil. Returns a pointer into the input slice — callers must not mutate the
+// returned taint in place if the slice will be patched later.
+func findTaintByKey(taints []corev1.Taint, key string) *corev1.Taint {
+	for i := range taints {
+		if taints[i].Key == key {
+			return &taints[i]
+		}
+	}
+
+	return nil
+}
+
+// transitionReleased sets NVSentinelOwnershipReleased to the given status with
+// the given reason / message via a status subresource merge patch. Preserves
+// any existing ExternalRemediationComplete condition (set by the external
+// system) untouched.
+func (r *ExternalRemediationRequestReconciler) transitionReleased(
+	ctx context.Context, errObj *nvsentinelv1.ExternalRemediationRequest,
+	status metav1.ConditionStatus, reason, message string,
+) error {
+	existing := statusConditions(errObj)
+	conditions := append([]metav1.Condition(nil), existing...)
+
+	meta.SetStatusCondition(&conditions, metav1.Condition{
+		Type:    ConditionNVSentinelOwnershipReleased,
+		Status:  status,
+		Reason:  reason,
+		Message: message,
+	})
+
+	return r.patchStatusConditions(ctx, errObj, conditions)
 }
 
 // statusConditions returns the ERR's status conditions as []metav1.Condition,
