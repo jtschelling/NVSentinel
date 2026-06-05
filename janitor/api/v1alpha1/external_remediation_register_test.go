@@ -30,7 +30,7 @@ import (
 func newERR() *ExternalRemediationRequest {
 	return &ExternalRemediationRequest{
 		TypeMeta: metav1.TypeMeta{
-			APIVersion: "nvsentinel.nvidia.com/v1alpha1",
+			APIVersion: "nvsentinel.nvidia.com/v1",
 			Kind:       "ExternalRemediationRequest",
 		},
 		ObjectMeta: metav1.ObjectMeta{
@@ -166,7 +166,7 @@ func TestExternalRemediationRequestList_DeepCopy_FieldFidelity(t *testing.T) {
 
 	original := &ExternalRemediationRequestList{
 		TypeMeta: metav1.TypeMeta{
-			APIVersion: "nvsentinel.nvidia.com/v1alpha1",
+			APIVersion: "nvsentinel.nvidia.com/v1",
 			Kind:       "ExternalRemediationRequestList",
 		},
 		Items: []ExternalRemediationRequest{*newERR(), *newERR()},
