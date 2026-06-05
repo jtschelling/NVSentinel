@@ -109,6 +109,8 @@ func NewActionMetrics() *ActionMetrics {
 		ttlDeletionsTotal,
 	)
 
+	registerERRMetrics()
+
 	return &ActionMetrics{}
 }
 

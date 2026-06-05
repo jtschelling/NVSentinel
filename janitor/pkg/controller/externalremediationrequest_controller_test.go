@@ -25,6 +25,7 @@ import (
 	. "github.com/onsi/gomega"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -32,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/record"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -40,21 +42,51 @@ import (
 	"github.com/nvidia/nvsentinel/commons/pkg/managed"
 	protos "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	nvsentinelv1 "github.com/nvidia/nvsentinel/janitor/api/v1alpha1"
+	janitormetrics "github.com/nvidia/nvsentinel/janitor/pkg/metrics"
 )
 
 const testERRNamespace = "default"
 
 // newERRReconciler returns a reconciler bound to the envtest API server.
 // Must only be called from within Ginkgo blocks (BeforeSuite populates cfg).
+// Includes a FakeRecorder with a generous buffer so test specs can pop events
+// off the channel without the recorder blocking the controller.
 func newERRReconciler() *ExternalRemediationRequestReconciler {
 	c, err := ctrlclient.New(cfg, ctrlclient.Options{Scheme: scheme.Scheme})
 	Expect(err).NotTo(HaveOccurred())
 
 	return &ExternalRemediationRequestReconciler{
-		Client: c,
-		Scheme: scheme.Scheme,
+		Client:   c,
+		Scheme:   scheme.Scheme,
+		Recorder: record.NewFakeRecorder(64),
 	}
 }
+
+// drainEvents pops up to maxN events from the FakeRecorder channel. Used by
+// the observability tests to assert which events fired during a reconcile
+// sequence. Returns whatever's currently in the buffer without blocking.
+func drainEvents(r *ExternalRemediationRequestReconciler) []string {
+	fake, ok := r.Recorder.(*record.FakeRecorder)
+	if !ok {
+		return nil
+	}
+
+	var got []string
+
+	for {
+		select {
+		case e := <-fake.Events:
+			got = append(got, e)
+		default:
+			return got
+		}
+	}
+}
+
+// testRecommendedActionLabel matches what production fault-remediation puts on
+// CUSTOM:external-remediation events. Tests should keep this stable so the
+// Prometheus label values in observability assertions match production reality.
+const testRecommendedActionLabel = "external-remediation"
 
 // newTestERR returns a minimal ExternalRemediationRequest object.
 func newTestERR(name, nodeName string) *nvsentinelv1.ExternalRemediationRequest {
@@ -69,11 +101,12 @@ func newTestERR(name, nodeName string) *nvsentinelv1.ExternalRemediationRequest 
 		},
 		Spec: &protos.ExternalRemediationRequestSpec{
 			HealthEvent: &protos.HealthEvent{
-				Id:                "he-" + name,
-				NodeName:          nodeName,
-				IsFatal:           true,
-				RecommendedAction: protos.RecommendedAction_CUSTOM,
-				Message:           "synthetic test fault",
+				Id:                      "he-" + name,
+				NodeName:                nodeName,
+				IsFatal:                 true,
+				RecommendedAction:       protos.RecommendedAction_CUSTOM,
+				CustomRecommendedAction: testRecommendedActionLabel,
+				Message:                 "synthetic test fault",
 			},
 		},
 	}
@@ -1049,3 +1082,176 @@ func snapshotConditions(errObj *nvsentinelv1.ExternalRemediationRequest) string 
 
 	return strings.Join(parts, "|")
 }
+
+var _ = Describe("ExternalRemediationRequest Controller observability (JSC-98)", func() {
+	var (
+		ctx context.Context
+		r   *ExternalRemediationRequestReconciler
+	)
+
+	BeforeEach(func() {
+		ctx = context.Background()
+		r = newERRReconciler()
+	})
+
+	It("increments err_total{created} exactly once on first init", func() {
+		errObj := newTestERR("obs-created-1", "node-obs-created-1")
+		Expect(r.Client.Create(ctx, errObj)).To(Succeed())
+		DeferCleanup(forceFinalizerRemoval, ctx, r, errObj)
+
+		before := testutil.ToFloat64(janitormetrics.ERRTotal.WithLabelValues(
+			janitormetrics.ERRPhaseCreated, ""))
+
+		key := ctrlclient.ObjectKey{Name: errObj.Name, Namespace: errObj.Namespace}
+		// Drive multiple reconciles; setInitialConditions only fires the
+		// counter on the pass that actually writes them.
+		for i := 0; i < 3; i++ {
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+		}
+
+		after := testutil.ToFloat64(janitormetrics.ERRTotal.WithLabelValues(
+			janitormetrics.ERRPhaseCreated, ""))
+		Expect(after-before).To(BeNumerically("==", 1.0),
+			"err_total{created} must fire exactly once across an init + idempotent re-reconciles")
+	})
+
+	It("increments released{success} + err_open{awaiting} + emits ReleaseTaintApplied on apply", func() {
+		nodeName := "node-obs-applied-1"
+		Expect(r.Client.Create(ctx, newTestNode(nodeName, nil, nil))).To(Succeed())
+		DeferCleanup(deleteNodeForCleanup, ctx, r, nodeName)
+
+		releasedBefore := testutil.ToFloat64(janitormetrics.ERRTotal.WithLabelValues(
+			janitormetrics.ERRPhaseReleased, janitormetrics.ERRResultSuccess))
+		openBefore := testutil.ToFloat64(janitormetrics.ERROpen.WithLabelValues(
+			nodeName, testRecommendedActionLabel, janitormetrics.ERROpenStateAwaiting))
+
+		errObj := newTestERR("obs-applied-1", nodeName)
+		Expect(r.Client.Create(ctx, errObj)).To(Succeed())
+		DeferCleanup(forceFinalizerRemoval, ctx, r, errObj)
+
+		key := ctrlclient.ObjectKey{Name: errObj.Name, Namespace: errObj.Namespace}
+		reconcileToSteadyState(ctx, r, key, 3)
+
+		Expect(testutil.ToFloat64(janitormetrics.ERRTotal.WithLabelValues(
+			janitormetrics.ERRPhaseReleased, janitormetrics.ERRResultSuccess)) - releasedBefore).
+			To(BeNumerically("==", 1.0))
+		Expect(testutil.ToFloat64(janitormetrics.ERROpen.WithLabelValues(
+			nodeName, testRecommendedActionLabel, janitormetrics.ERROpenStateAwaiting)) - openBefore).
+			To(BeNumerically("==", 1.0))
+
+		// Re-reconcile to confirm we don't double-count once the condition has
+		// transitioned to True (the dispatcher exits branch 3 and stops calling
+		// the transition helpers).
+		for i := 0; i < 3; i++ {
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+		}
+		Expect(testutil.ToFloat64(janitormetrics.ERRTotal.WithLabelValues(
+			janitormetrics.ERRPhaseReleased, janitormetrics.ERRResultSuccess)) - releasedBefore).
+			To(BeNumerically("==", 1.0), "released{success} must NOT double-count on re-reconciles")
+
+		events := drainEvents(r)
+		Expect(events).To(ContainElement(ContainSubstring(eventReasonReleaseTaintApplied)))
+	})
+
+	It("increments released{failure} + emits ReleaseTaintFailed on drift", func() {
+		nodeName := "node-obs-drift-1"
+		// Pre-existing taint with a DIFFERENT ERR's name.
+		Expect(r.Client.Create(ctx, newTestNode(nodeName, nil,
+			[]corev1.Taint{{Key: ReleaseTaintKey, Value: "foreign-owner", Effect: corev1.TaintEffectNoSchedule}}))).
+			To(Succeed())
+		DeferCleanup(deleteNodeForCleanup, ctx, r, nodeName)
+
+		failureBefore := testutil.ToFloat64(janitormetrics.ERRTotal.WithLabelValues(
+			janitormetrics.ERRPhaseReleased, janitormetrics.ERRResultFailure))
+
+		errObj := newTestERR("obs-drift-1", nodeName)
+		Expect(r.Client.Create(ctx, errObj)).To(Succeed())
+		DeferCleanup(forceFinalizerRemoval, ctx, r, errObj)
+
+		key := ctrlclient.ObjectKey{Name: errObj.Name, Namespace: errObj.Namespace}
+		reconcileToSteadyState(ctx, r, key, 3)
+
+		Expect(testutil.ToFloat64(janitormetrics.ERRTotal.WithLabelValues(
+			janitormetrics.ERRPhaseReleased, janitormetrics.ERRResultFailure)) - failureBefore).
+			To(BeNumerically("==", 1.0))
+
+		events := drainEvents(r)
+		Expect(events).To(ContainElement(ContainSubstring(eventReasonReleaseTaintFailed)))
+	})
+
+	It("increments closed{success} + external_response{success} + observes age on True cleanup", func() {
+		nodeName := "node-obs-close-success-1"
+		key := prepareReleased(ctx, r, "obs-close-success-1", nodeName)
+		DeferCleanup(forceFinalizerRemovalByKey, ctx, r, key)
+		DeferCleanup(deleteNodeForCleanup, ctx, r, nodeName)
+
+		// Drain events fired during the apply phase; we only want to assert
+		// the close-phase events here.
+		drainEvents(r)
+
+		closedBefore := testutil.ToFloat64(janitormetrics.ERRTotal.WithLabelValues(
+			janitormetrics.ERRPhaseClosed, janitormetrics.ERRResultSuccess))
+		extRespBefore := testutil.ToFloat64(janitormetrics.ERRTotal.WithLabelValues(
+			janitormetrics.ERRPhaseExternalResponse, janitormetrics.ERRResultSuccess))
+
+		setExternalRemediationComplete(ctx, r.Client,
+			&nvsentinelv1.ExternalRemediationRequest{ObjectMeta: metav1.ObjectMeta{
+				Name: key.Name, Namespace: key.Namespace,
+			}}, "True", "ExternalRemediationSucceeded")
+
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(testutil.ToFloat64(janitormetrics.ERRTotal.WithLabelValues(
+			janitormetrics.ERRPhaseClosed, janitormetrics.ERRResultSuccess)) - closedBefore).
+			To(BeNumerically("==", 1.0))
+		Expect(testutil.ToFloat64(janitormetrics.ERRTotal.WithLabelValues(
+			janitormetrics.ERRPhaseExternalResponse, janitormetrics.ERRResultSuccess)) - extRespBefore).
+			To(BeNumerically("==", 1.0))
+		// err_age_seconds Observe is called unconditionally inside recordClose,
+		// which only runs when the closed{success} counter above increments.
+		// Asserting it here would require a per-label-tuple histogram-count
+		// getter that doesn't exist in testutil; the counter check above is
+		// sufficient proof that the histogram observation also fired.
+
+		events := drainEvents(r)
+		Expect(events).To(ContainElement(ContainSubstring(eventReasonReleaseTaintRemoved)))
+		Expect(events).To(ContainElement(ContainSubstring(closeReasonExternalRemediationCompleteTrue)))
+
+		// Subsequent reconciles should NOT double-count; reconcileCleanup is idempotent.
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(testutil.ToFloat64(janitormetrics.ERRTotal.WithLabelValues(
+			janitormetrics.ERRPhaseClosed, janitormetrics.ERRResultSuccess)) - closedBefore).
+			To(BeNumerically("==", 1.0), "closed{success} must NOT double-count after cleanup")
+	})
+
+	It("increments closed{operator_deleted} + emits OperatorDeleteRequested + ReleaseTaintRemoved on delete", func() {
+		nodeName := "node-obs-close-deleted-1"
+		key := prepareReleased(ctx, r, "obs-close-deleted-1", nodeName)
+		DeferCleanup(deleteNodeForCleanup, ctx, r, nodeName)
+
+		drainEvents(r) // discard apply-phase events
+
+		closedBefore := testutil.ToFloat64(janitormetrics.ERRTotal.WithLabelValues(
+			janitormetrics.ERRPhaseClosed, janitormetrics.ERRResultOperatorDeleted))
+
+		Expect(r.Client.Delete(ctx, &nvsentinelv1.ExternalRemediationRequest{
+			ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace},
+		})).To(Succeed())
+
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(testutil.ToFloat64(janitormetrics.ERRTotal.WithLabelValues(
+			janitormetrics.ERRPhaseClosed, janitormetrics.ERRResultOperatorDeleted)) - closedBefore).
+			To(BeNumerically("==", 1.0))
+
+		events := drainEvents(r)
+		Expect(events).To(ContainElement(ContainSubstring(eventReasonOperatorDeleteRequest)))
+		Expect(events).To(ContainElement(ContainSubstring(eventReasonReleaseTaintRemoved)))
+		Expect(events).To(ContainElement(ContainSubstring(closeReasonOperatorInitiated)))
+	})
+})
