@@ -33,6 +33,8 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
+
+	"github.com/nvidia/nvsentinel/commons/pkg/managed"
 )
 
 // go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
@@ -865,38 +867,38 @@ func TestGateOnManaged(t *testing.T) {
 	}{
 		{
 			name:           "managed=false strips all three detection labels",
-			labels:         map[string]string{ManagedLabelKey: "false", DCGMVersionLabel: "4.x", DriverInstalledLabel: "true", KataEnabledLabel: "true"},
+			labels:         map[string]string{managed.ManagedLabelKey: "false", DCGMVersionLabel: "4.x", DriverInstalledLabel: "true", KataEnabledLabel: "true"},
 			wantGated:      true,
 			wantNeedsPatch: true,
-			wantLabels:     map[string]string{ManagedLabelKey: "false"},
+			wantLabels:     map[string]string{managed.ManagedLabelKey: "false"},
 		},
 		{
 			name:           "managed=false strips only the present subset",
-			labels:         map[string]string{ManagedLabelKey: "false", DCGMVersionLabel: "4.x"},
+			labels:         map[string]string{managed.ManagedLabelKey: "false", DCGMVersionLabel: "4.x"},
 			wantGated:      true,
 			wantNeedsPatch: true,
-			wantLabels:     map[string]string{ManagedLabelKey: "false"},
+			wantLabels:     map[string]string{managed.ManagedLabelKey: "false"},
 		},
 		{
 			name:           "managed=false on a clean node is a gated no-op",
-			labels:         map[string]string{ManagedLabelKey: "false"},
+			labels:         map[string]string{managed.ManagedLabelKey: "false"},
 			wantGated:      true,
 			wantNeedsPatch: false,
-			wantLabels:     map[string]string{ManagedLabelKey: "false"},
+			wantLabels:     map[string]string{managed.ManagedLabelKey: "false"},
 		},
 		{
 			name:           "managed=false preserves unrelated labels",
-			labels:         map[string]string{ManagedLabelKey: "false", DCGMVersionLabel: "4.x", "foo": "bar", "node-role.kubernetes.io/agent": ""},
+			labels:         map[string]string{managed.ManagedLabelKey: "false", DCGMVersionLabel: "4.x", "foo": "bar", "node-role.kubernetes.io/agent": ""},
 			wantGated:      true,
 			wantNeedsPatch: true,
-			wantLabels:     map[string]string{ManagedLabelKey: "false", "foo": "bar", "node-role.kubernetes.io/agent": ""},
+			wantLabels:     map[string]string{managed.ManagedLabelKey: "false", "foo": "bar", "node-role.kubernetes.io/agent": ""},
 		},
 		{
 			name:           "managed=true is NOT gated (normal stamping proceeds)",
-			labels:         map[string]string{ManagedLabelKey: "true", DCGMVersionLabel: "4.x"},
+			labels:         map[string]string{managed.ManagedLabelKey: "true", DCGMVersionLabel: "4.x"},
 			wantGated:      false,
 			wantNeedsPatch: false,
-			wantLabels:     map[string]string{ManagedLabelKey: "true", DCGMVersionLabel: "4.x"},
+			wantLabels:     map[string]string{managed.ManagedLabelKey: "true", DCGMVersionLabel: "4.x"},
 		},
 		{
 			name:           "managed label absent is NOT gated",
@@ -907,10 +909,10 @@ func TestGateOnManaged(t *testing.T) {
 		},
 		{
 			name:           "managed=<typo> is NOT gated (defensive: only the canonical false value opts out)",
-			labels:         map[string]string{ManagedLabelKey: "False", DCGMVersionLabel: "4.x"},
+			labels:         map[string]string{managed.ManagedLabelKey: "False", DCGMVersionLabel: "4.x"},
 			wantGated:      false,
 			wantNeedsPatch: false,
-			wantLabels:     map[string]string{ManagedLabelKey: "False", DCGMVersionLabel: "4.x"},
+			wantLabels:     map[string]string{managed.ManagedLabelKey: "False", DCGMVersionLabel: "4.x"},
 		},
 		{
 			name:           "nil labels map is NOT gated",
@@ -970,11 +972,11 @@ func TestNodeRequiresReconciliation_ManagedLabelChanges(t *testing.T) {
 			newNode := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{}}}
 
 			if tt.oldLabel != "" {
-				oldNode.Labels[ManagedLabelKey] = tt.oldLabel
+				oldNode.Labels[managed.ManagedLabelKey] = tt.oldLabel
 			}
 
 			if tt.newLabel != "" {
-				newNode.Labels[ManagedLabelKey] = tt.newLabel
+				newNode.Labels[managed.ManagedLabelKey] = tt.newLabel
 			}
 
 			got := l.nodeRequiresReconciliation(oldNode, newNode)
@@ -1006,7 +1008,7 @@ func TestManagedFalseRemovesDetectionLabelsViaHandleNodeEvent(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "managed-false-node",
 			Labels: map[string]string{
-				ManagedLabelKey:      ManagedLabelValueFalse,
+				managed.ManagedLabelKey:      managed.ManagedLabelValueFalse,
 				DCGMVersionLabel:     "4.x",
 				DriverInstalledLabel: "true",
 				KataEnabledLabel:     "true",
@@ -1044,7 +1046,7 @@ func TestManagedFalseRemovesDetectionLabelsViaHandleNodeEvent(t *testing.T) {
 			}
 		}
 		// Unrelated label must survive; managed=false stays.
-		return got.Labels[ManagedLabelKey] == ManagedLabelValueFalse &&
+		return got.Labels[managed.ManagedLabelKey] == managed.ManagedLabelValueFalse &&
 			got.Labels["unrelated"] == "preserved"
 	}, 10*time.Second, 200*time.Millisecond,
 		"managed=false node must lose its three detection labels but keep unrelated labels")

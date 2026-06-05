@@ -37,6 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	"github.com/nvidia/nvsentinel/commons/pkg/managed"
 	protos "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	nvsentinelv1 "github.com/nvidia/nvsentinel/janitor/api/v1alpha1"
 )
@@ -342,7 +343,7 @@ var _ = Describe("ExternalRemediationRequest Controller resolution paths (branch
 			Expect(r.Client.Get(ctx, ctrlclient.ObjectKey{Name: nodeName}, &node)).To(Succeed())
 			Expect(findTaintByKey(node.Spec.Taints, ReleaseTaintKey)).To(BeNil(),
 				"release taint must be removed after Complete=True")
-			Expect(node.Labels).NotTo(HaveKey(ManagedLabelKey),
+			Expect(node.Labels).NotTo(HaveKey(managed.ManagedLabelKey),
 				"managed label must be removed entirely (absence is the default-managed state)")
 
 			// ERR stays in the cluster as a historical record with the finalizer attached.
@@ -419,7 +420,7 @@ var _ = Describe("ExternalRemediationRequest Controller resolution paths (branch
 			taint := findTaintByKey(node.Spec.Taints, ReleaseTaintKey)
 			Expect(taint).NotTo(BeNil(), "foreign taint must NOT be removed by our cleanup")
 			Expect(taint.Value).To(Equal("foreign-err"))
-			Expect(node.Labels).NotTo(HaveKey(ManagedLabelKey),
+			Expect(node.Labels).NotTo(HaveKey(managed.ManagedLabelKey),
 				"label removal is unconditional (cluster-wide semantics)")
 		})
 	})
@@ -442,7 +443,7 @@ var _ = Describe("ExternalRemediationRequest Controller resolution paths (branch
 			var node corev1.Node
 			Expect(r.Client.Get(ctx, ctrlclient.ObjectKey{Name: nodeName}, &node)).To(Succeed())
 			Expect(findTaintByKey(node.Spec.Taints, ReleaseTaintKey)).To(BeNil())
-			Expect(node.Labels).NotTo(HaveKey(ManagedLabelKey))
+			Expect(node.Labels).NotTo(HaveKey(managed.ManagedLabelKey))
 
 			// ERR should be garbage-collected.
 			var got nvsentinelv1.ExternalRemediationRequest
@@ -520,7 +521,7 @@ var _ = Describe("ExternalRemediationRequest Controller resolution paths (branch
 		var nodeAfterApply corev1.Node
 		Expect(r.Client.Get(ctx, ctrlclient.ObjectKey{Name: nodeName}, &nodeAfterApply)).To(Succeed())
 		Expect(findTaintByKey(nodeAfterApply.Spec.Taints, ReleaseTaintKey)).NotTo(BeNil())
-		Expect(nodeAfterApply.Labels).To(HaveKeyWithValue(ManagedLabelKey, ManagedLabelValueFalse))
+		Expect(nodeAfterApply.Labels).To(HaveKeyWithValue(managed.ManagedLabelKey, managed.ManagedLabelValueFalse))
 
 		setExternalRemediationComplete(ctx, r.Client,
 			&nvsentinelv1.ExternalRemediationRequest{ObjectMeta: metav1.ObjectMeta{
@@ -534,7 +535,7 @@ var _ = Describe("ExternalRemediationRequest Controller resolution paths (branch
 		Expect(r.Client.Get(ctx, ctrlclient.ObjectKey{Name: nodeName}, &nodeAfterCleanup)).To(Succeed())
 		Expect(findTaintByKey(nodeAfterCleanup.Spec.Taints, ReleaseTaintKey)).To(BeNil(),
 			"end-of-lifecycle: release taint removed")
-		Expect(nodeAfterCleanup.Labels).NotTo(HaveKey(ManagedLabelKey),
+		Expect(nodeAfterCleanup.Labels).NotTo(HaveKey(managed.ManagedLabelKey),
 			"end-of-lifecycle: managed label removed")
 	})
 })
@@ -578,7 +579,7 @@ var _ = Describe("ExternalRemediationRequest Controller asymmetric False handlin
 		taint := findTaintByKey(nodeAfter.Spec.Taints, ReleaseTaintKey)
 		Expect(taint).NotTo(BeNil(), "release taint must remain in place on Complete=False")
 		Expect(taint.Value).To(Equal(key.Name))
-		Expect(nodeAfter.Labels).To(HaveKeyWithValue(ManagedLabelKey, ManagedLabelValueFalse),
+		Expect(nodeAfter.Labels).To(HaveKeyWithValue(managed.ManagedLabelKey, managed.ManagedLabelValueFalse),
 			"managed=false label must remain in place on Complete=False")
 	})
 
@@ -631,7 +632,7 @@ var _ = Describe("ExternalRemediationRequest Controller asymmetric False handlin
 		var nodeAtFalse corev1.Node
 		Expect(r.Client.Get(ctx, ctrlclient.ObjectKey{Name: nodeName}, &nodeAtFalse)).To(Succeed())
 		Expect(findTaintByKey(nodeAtFalse.Spec.Taints, ReleaseTaintKey)).NotTo(BeNil())
-		Expect(nodeAtFalse.Labels).To(HaveKeyWithValue(ManagedLabelKey, ManagedLabelValueFalse))
+		Expect(nodeAtFalse.Labels).To(HaveKeyWithValue(managed.ManagedLabelKey, managed.ManagedLabelValueFalse))
 
 		// Retry: external system now reports True. Branch 4 must fire and clean up.
 		setExternalRemediationComplete(ctx, r.Client,
@@ -645,7 +646,7 @@ var _ = Describe("ExternalRemediationRequest Controller asymmetric False handlin
 		Expect(r.Client.Get(ctx, ctrlclient.ObjectKey{Name: nodeName}, &nodeAfterCleanup)).To(Succeed())
 		Expect(findTaintByKey(nodeAfterCleanup.Spec.Taints, ReleaseTaintKey)).To(BeNil(),
 			"False->True retry must trigger branch 4 cleanup")
-		Expect(nodeAfterCleanup.Labels).NotTo(HaveKey(ManagedLabelKey))
+		Expect(nodeAfterCleanup.Labels).NotTo(HaveKey(managed.ManagedLabelKey))
 	})
 
 	It("releases the node via branch 2 when the operator deletes the ERR while it sits at False", func() {
@@ -672,7 +673,7 @@ var _ = Describe("ExternalRemediationRequest Controller asymmetric False handlin
 		Expect(r.Client.Get(ctx, ctrlclient.ObjectKey{Name: nodeName}, &nodeAfter)).To(Succeed())
 		Expect(findTaintByKey(nodeAfter.Spec.Taints, ReleaseTaintKey)).To(BeNil(),
 			"operator delete must trigger branch 2 cleanup even from the False state")
-		Expect(nodeAfter.Labels).NotTo(HaveKey(ManagedLabelKey))
+		Expect(nodeAfter.Labels).NotTo(HaveKey(managed.ManagedLabelKey))
 
 		var got nvsentinelv1.ExternalRemediationRequest
 		err = r.Client.Get(ctx, key, &got)
@@ -718,7 +719,7 @@ var _ = Describe("ExternalRemediationRequest Controller apply path (branch 3)", 
 		Expect(taint).NotTo(BeNil(), "release taint must be applied")
 		Expect(taint.Value).To(Equal(errObj.Name), "taint value must carry owning ERR's name")
 		Expect(taint.Effect).To(Equal(corev1.TaintEffectNoSchedule))
-		Expect(node.Labels).To(HaveKeyWithValue(ManagedLabelKey, ManagedLabelValueFalse),
+		Expect(node.Labels).To(HaveKeyWithValue(managed.ManagedLabelKey, managed.ManagedLabelValueFalse),
 			"managed=false label must be set")
 	})
 
@@ -756,7 +757,7 @@ var _ = Describe("ExternalRemediationRequest Controller apply path (branch 3)", 
 		// Pre-apply the taint + label as if a prior reconcile succeeded then crashed
 		// before status was written. Verifies the already-applied detection.
 		Expect(r.Client.Create(ctx, newTestNode(nodeName,
-			map[string]string{ManagedLabelKey: ManagedLabelValueFalse},
+			map[string]string{managed.ManagedLabelKey: managed.ManagedLabelValueFalse},
 			[]corev1.Taint{{Key: ReleaseTaintKey, Value: "recover-err-1", Effect: corev1.TaintEffectNoSchedule}}))).
 			To(Succeed())
 		DeferCleanup(deleteNodeForCleanup, ctx, r, nodeName)
@@ -844,7 +845,7 @@ var _ = Describe("ExternalRemediationRequest Controller apply path (branch 3)", 
 		taint := findTaintByKey(node.Spec.Taints, ReleaseTaintKey)
 		Expect(taint).NotTo(BeNil())
 		Expect(taint.Value).To(Equal("some-other-err"), "drift case must NOT overwrite the existing taint")
-		Expect(node.Labels).NotTo(HaveKey(ManagedLabelKey), "drift case must NOT set managed=false")
+		Expect(node.Labels).NotTo(HaveKey(managed.ManagedLabelKey), "drift case must NOT set managed=false")
 	})
 
 	It("transitions to False when the Node patch is forbidden by RBAC", func() {

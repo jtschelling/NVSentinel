@@ -33,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
+	"github.com/nvidia/nvsentinel/commons/pkg/managed"
 	protos "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	nvsentinelv1 "github.com/nvidia/nvsentinel/janitor/api/v1alpha1"
 	"github.com/nvidia/nvsentinel/janitor/pkg/condition"
@@ -68,17 +69,6 @@ const (
 	// node via `kubectl describe node` without consulting separate annotations.
 	// Per ADR-040.
 	ReleaseTaintKey = "nvsentinel.nvidia.com/external-remediation"
-
-	// ManagedLabelKey is the Node label that gates NVSentinel cluster-scope
-	// emission and node-labeler detection-label stamping. A value of "false"
-	// means external systems own the node; absence means NVSentinel owns it.
-	// Centralised in commons/pkg/managed by JSC-88 once that lands; defined
-	// locally here so the apply path doesn't block on it.
-	ManagedLabelKey = "nvsentinel.dgxc.nvidia.com/managed"
-
-	// ManagedLabelValueFalse is the value of ManagedLabelKey when external
-	// systems own the node.
-	ManagedLabelValueFalse = "false"
 
 	// ReasonReleaseTaintApplied is the NVSentinelOwnershipReleased=True
 	// reason set after the release taint and managed=false label land.
@@ -304,7 +294,7 @@ func (r *ExternalRemediationRequestReconciler) reconcileApply(
 		}
 		// Taint already in place with our name — verify the label is also present,
 		// then transition the condition without issuing a redundant PATCH.
-		if node.Labels[ManagedLabelKey] == ManagedLabelValueFalse {
+		if node.Labels[managed.ManagedLabelKey] == managed.ManagedLabelValueFalse {
 			slog.InfoContext(ctx, "release taint and managed=false label already in place; transitioning condition",
 				"err", errObj.Name, "node", nodeName)
 
@@ -329,7 +319,7 @@ func (r *ExternalRemediationRequestReconciler) reconcileApply(
 		nodeToUpdate.Labels = map[string]string{}
 	}
 
-	nodeToUpdate.Labels[ManagedLabelKey] = ManagedLabelValueFalse
+	nodeToUpdate.Labels[managed.ManagedLabelKey] = managed.ManagedLabelValueFalse
 
 	if err := r.Patch(ctx, nodeToUpdate, client.StrategicMergeFrom(&node)); err != nil {
 		if apierrors.IsForbidden(err) {
@@ -455,8 +445,8 @@ func (r *ExternalRemediationRequestReconciler) reconcileCleanup(
 		}
 	}
 
-	if _, ok := nodeToUpdate.Labels[ManagedLabelKey]; ok {
-		delete(nodeToUpdate.Labels, ManagedLabelKey)
+	if _, ok := nodeToUpdate.Labels[managed.ManagedLabelKey]; ok {
+		delete(nodeToUpdate.Labels, managed.ManagedLabelKey)
 		changed = true
 	}
 

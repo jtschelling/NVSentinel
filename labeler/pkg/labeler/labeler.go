@@ -30,6 +30,7 @@ import (
 	"k8s.io/client-go/util/retry"
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 
+	"github.com/nvidia/nvsentinel/commons/pkg/managed"
 	"github.com/nvidia/nvsentinel/commons/pkg/stringutil"
 	"github.com/nvidia/nvsentinel/labeler/pkg/metrics"
 )
@@ -39,17 +40,6 @@ const (
 	DriverInstalledLabel    = "nvsentinel.dgxc.nvidia.com/driver.installed"
 	KataEnabledLabel        = "nvsentinel.dgxc.nvidia.com/kata.enabled"
 	KataRuntimeDefaultLabel = "katacontainers.io/kata-runtime"
-
-	// ManagedLabelKey is the cluster-wide opt-out label written by the ERR
-	// reconciler when releasing a Node to an external system. node-labeler
-	// reads it (never writes it). When the value is "false", node-labeler
-	// strips detection labels so DaemonSet monitors evict naturally via
-	// their existing nodeSelectors.
-	//
-	// Centralised in commons/pkg/managed by JSC-88 once that lands; defined
-	// locally here so JSC-89 doesn't block on JSC-88.
-	ManagedLabelKey        = "nvsentinel.dgxc.nvidia.com/managed"
-	ManagedLabelValueFalse = "false"
 
 	NodeDCGMIndex               = "nodeDCGM"
 	NodeDriverIndex             = "nodeDriver"
@@ -87,7 +77,7 @@ var detectionLabels = []string{
 // "manage normally" so a typo or stale value doesn't accidentally release
 // a Node from observation.
 func gateOnManaged(node *v1.Node) (gated, needsUpdate bool) {
-	if node.Labels[ManagedLabelKey] != ManagedLabelValueFalse {
+	if node.Labels[managed.ManagedLabelKey] != managed.ManagedLabelValueFalse {
 		return false, false
 	}
 
@@ -471,7 +461,7 @@ func (l *Labeler) nodeRequiresReconciliation(oldObj, newObj any) bool {
 		return true
 	}
 
-	if oldNode.Labels[ManagedLabelKey] != newNode.Labels[ManagedLabelKey] {
+	if oldNode.Labels[managed.ManagedLabelKey] != newNode.Labels[managed.ManagedLabelKey] {
 		return true
 	}
 
