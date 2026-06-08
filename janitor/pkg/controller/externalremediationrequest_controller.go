@@ -72,8 +72,8 @@ const (
 	// to release it from NVSentinel ownership. The taint's value carries the
 	// owning ERR's metadata.name so operators can discover which ERR holds the
 	// node via `kubectl describe node` without consulting separate annotations.
-	// Per ADR-040.
-	ReleaseTaintKey = "nvsentinel.nvidia.com/external-remediation"
+	// Per ADR-040. Canonical definition lives in commons/pkg/managed.
+	ReleaseTaintKey = managed.ReleaseTaintKey
 
 	// ReasonReleaseTaintApplied is the NVSentinelOwnershipReleased=True
 	// reason set after the release taint and managed=false label land.

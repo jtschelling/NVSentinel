@@ -21,6 +21,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	protos "github.com/nvidia/nvsentinel/data-models/pkg/protos"
+	"github.com/nvidia/nvsentinel/commons/pkg/managed"
 )
 
 // NVSentinelGroupVersion is the GroupVersion used by ExternalRemediationRequest.
@@ -35,7 +36,7 @@ import (
 // ERR API is still pre-stable; ADR-040 governs its lifecycle.
 //
 // See ADR-040 for the design.
-var NVSentinelGroupVersion = schema.GroupVersion{Group: "nvsentinel.nvidia.com", Version: "v1"}
+var NVSentinelGroupVersion = schema.GroupVersion{Group: managed.ERRApiGroup, Version: managed.ERRVersion}
 
 // NVSentinelSchemeBuilder is the SchemeBuilder for the nvsentinel.nvidia.com
 // API group. It is independent of the SchemeBuilder for janitor.dgxc.nvidia.com

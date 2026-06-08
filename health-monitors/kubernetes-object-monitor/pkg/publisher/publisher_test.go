@@ -23,29 +23,12 @@ import (
 	"google.golang.org/protobuf/types/known/emptypb"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/informers"
-	"k8s.io/client-go/kubernetes/fake"
-	listersv1 "k8s.io/client-go/listers/core/v1"
 
 	"github.com/nvidia/nvsentinel/commons/pkg/managed"
+	"github.com/nvidia/nvsentinel/commons/pkg/managed/managedtest"
 	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/health-monitors/kubernetes-object-monitor/pkg/config"
 )
-
-// nodeListerWith builds an informer-backed NodeLister pre-populated with the
-// given Nodes for the gate tests.
-func nodeListerWith(t *testing.T, nodes ...*corev1.Node) listersv1.NodeLister {
-	t.Helper()
-
-	factory := informers.NewSharedInformerFactory(fake.NewSimpleClientset(), 0)
-	informer := factory.Core().V1().Nodes().Informer()
-
-	for _, n := range nodes {
-		require.NoError(t, informer.GetStore().Add(n))
-	}
-
-	return factory.Core().V1().Nodes().Lister()
-}
 
 type fakePlatformConnectorClient struct {
 	events *pb.HealthEvents
@@ -134,7 +117,7 @@ func TestPublishHealthEvent_GatedOnManagedFalse(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			client := &fakePlatformConnectorClient{}
-			lister := nodeListerWith(t, &corev1.Node{
+			lister := managedtest.NodeListerWith(t, &corev1.Node{
 				ObjectMeta: metav1.ObjectMeta{Name: "node-1", Labels: tt.nodeLabels},
 			})
 
@@ -163,7 +146,7 @@ func TestPublishHealthEvent_GatedOnManagedFalse(t *testing.T) {
 // node, the gate must NOT silence emission (fail-open per ADR-040).
 func TestPublishHealthEvent_FailsOpenForUnknownNode(t *testing.T) {
 	client := &fakePlatformConnectorClient{}
-	lister := nodeListerWith(t) // empty cache
+	lister := managedtest.NodeListerWith(t) // empty cache
 
 	pub := New(client, "passthrough:///platform-connector",
 		pb.ProcessingStrategy_EXECUTE_REMEDIATION, lister)

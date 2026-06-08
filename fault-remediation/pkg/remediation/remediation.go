@@ -40,6 +40,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
 
+	"github.com/nvidia/nvsentinel/commons/pkg/managed"
 	"github.com/nvidia/nvsentinel/commons/pkg/tracing"
 	"github.com/nvidia/nvsentinel/data-models/pkg/model"
 	"github.com/nvidia/nvsentinel/data-models/pkg/protos"
@@ -305,14 +306,6 @@ func templateDataFromEvent(healthEvent *protos.HealthEvent, healthEventID, trace
 }
 
 const (
-	// errCRDApiGroup / errCRDKind identify the ExternalRemediationRequest
-	// CRD. They MUST match the values used by the ERR reconciler and the
-	// commons/pkg/managed constants — that match is what lets the ERR
-	// reconciler's apply path use this CR's metadata.name as the release
-	// taint value.
-	errCRDApiGroup = "nvsentinel.nvidia.com"
-	errCRDKind     = "ExternalRemediationRequest"
-
 	// errCRNameMaxLen is the maximum length of an ERR's metadata.name,
 	// bounded by Kubernetes' taint-value rules (label-value semantics:
 	// ≤63 chars, [a-z0-9._-]). The ERR reconciler puts the name in the
@@ -332,10 +325,9 @@ const (
 )
 
 // isExternalRemediationRequestResource is the dispatch predicate that selects
-// ERR-specific code paths in this package. Kept identical in spelling to the
-// matching predicate in pkg/crstatus so the two stay in lockstep.
+// ERR-specific code paths in this package.
 func isExternalRemediationRequestResource(r config.MaintenanceResource) bool {
-	return r.ApiGroup == errCRDApiGroup && r.Kind == errCRDKind
+	return managed.IsERRResource(r.ApiGroup, r.Kind)
 }
 
 // computeCRName returns the CR's deterministic name. For ERR the name is

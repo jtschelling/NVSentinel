@@ -29,32 +29,14 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/informers"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
-	listersv1 "k8s.io/client-go/listers/core/v1"
 
 	"github.com/nvidia/nvsentinel/commons/pkg/managed"
+	"github.com/nvidia/nvsentinel/commons/pkg/managed/managedtest"
 	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/config"
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/model"
 )
-
-// nodeListerWith builds an informer-backed NodeLister pre-populated with the
-// given Nodes for the gate tests.
-func nodeListerWith(t *testing.T, nodes ...*corev1.Node) listersv1.NodeLister {
-	t.Helper()
-
-	factory := informers.NewSharedInformerFactory(k8sfake.NewSimpleClientset(), 0)
-	informer := factory.Core().V1().Nodes().Informer()
-
-	for _, n := range nodes {
-		if err := informer.GetStore().Add(n); err != nil {
-			t.Fatalf("nodeListerWith: %v", err)
-		}
-	}
-
-	return factory.Core().V1().Nodes().Lister()
-}
 
 type MockDatastore struct {
 	mock.Mock
@@ -854,7 +836,7 @@ func TestProcessAndSendTrigger_GatedOnManagedFalse(t *testing.T) {
 		mStore := new(MockDatastore)
 		mUDSClient := new(MockUDSClient)
 		mockClient := createMockClientWithReadyNodes(event.NodeName)
-		lister := nodeListerWith(t, &corev1.Node{
+		lister := managedtest.NodeListerWith(t, &corev1.Node{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:   event.NodeName,
 				Labels: map[string]string{managed.ManagedLabelKey: managed.ManagedLabelValueFalse},
@@ -880,7 +862,7 @@ func TestProcessAndSendTrigger_GatedOnManagedFalse(t *testing.T) {
 		mStore := new(MockDatastore)
 		mUDSClient := new(MockUDSClient)
 		mockClient := createMockClientWithReadyNodes(event.NodeName)
-		lister := nodeListerWith(t, &corev1.Node{
+		lister := managedtest.NodeListerWith(t, &corev1.Node{
 			ObjectMeta: metav1.ObjectMeta{Name: event.NodeName},
 		})
 
@@ -901,7 +883,7 @@ func TestProcessAndSendTrigger_GatedOnManagedFalse(t *testing.T) {
 		mStore := new(MockDatastore)
 		mUDSClient := new(MockUDSClient)
 		mockClient := createMockClientWithReadyNodes(event.NodeName)
-		lister := nodeListerWith(t) // empty cache
+		lister := managedtest.NodeListerWith(t) // empty cache
 
 		engine := NewEngine(cfg, mStore, mUDSClient, "tcp://test", mockClient, lister, pb.ProcessingStrategy_EXECUTE_REMEDIATION)
 

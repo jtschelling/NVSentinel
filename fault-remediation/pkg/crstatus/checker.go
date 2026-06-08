@@ -22,6 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/nvidia/nvsentinel/commons/pkg/managed"
 	"github.com/nvidia/nvsentinel/fault-remediation/pkg/config"
 )
 
@@ -128,20 +129,12 @@ func (c *CRStatusChecker) checkCondition(obj *unstructured.Unstructured, resourc
 	}
 }
 
-// ExternalRemediationRequest constants mirror the values used by the ERR
-// reconciler and the fault-remediation TOML config entry. The pair is the
-// dispatch key for the asymmetric True/False semantics defined in ADR-040.
-const (
-	errAPIGroup = "nvsentinel.nvidia.com"
-	errKind     = "ExternalRemediationRequest"
-)
-
 // isExternalRemediationRequest reports whether the configured remediation
 // resource targets the ERR CRD. ERR has asymmetric completion semantics
 // per ADR-040, so checkCondition routes it through errStateFromCondition
 // rather than the default True=Succeeded / False=Failed mapping.
 func isExternalRemediationRequest(r config.MaintenanceResource) bool {
-	return r.ApiGroup == errAPIGroup && r.Kind == errKind
+	return managed.IsERRResource(r.ApiGroup, r.Kind)
 }
 
 // errStateFromCondition implements the ADR-040 asymmetric mapping for the
