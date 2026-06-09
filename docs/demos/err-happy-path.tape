@@ -116,6 +116,8 @@ Sleep 5s
 
 # 9. ERR finalized
 Type "echo '── 9. Node-labeler reapplied relevant node labels — monitors rescheduled ──'"
+Enter
+Sleep 200ms
 Type "kubectl get pods -n nvsentinel --field-selector spec.nodeName=kwok-node-5"
 Enter
 Sleep 5s
