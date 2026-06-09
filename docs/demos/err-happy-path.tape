@@ -47,7 +47,7 @@ Sleep 5s
 # 3. Apply
 Sleep 5s
 Ctrl+L
-Type "echo '── 3. fault-remediation creates the ERR on EXTERNAL_REMEDIATION action ──'"
+Type "echo '── 3. For this demo, we apply directly. This step is completed by fault-remediation module in production ──'"
 Enter
 Sleep 500ms
 Type "kubectl apply -f docs/demos/err-demo-node.yaml"
@@ -115,12 +115,7 @@ Enter
 Sleep 5s
 
 # 9. ERR finalized
-Type "echo '── 9. ERR finalizer ran — object deleted, monitors rescheduled ──'"
-Enter
-Sleep 500ms
-Type "kubectl get externalremediationrequests -n nvsentinel"
-Enter
-Sleep 5s
+Type "echo '── 9. Node-labeler reapplied relevant node labels — monitors rescheduled ──'"
 Type "kubectl get pods -n nvsentinel --field-selector spec.nodeName=kwok-node-5"
 Enter
 Sleep 5s
