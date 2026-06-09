@@ -1,4 +1,5 @@
 # VHS tape: ExternalRemediationRequest happy-path demo
+# Re-render: vhs docs/demos/err-happy-path.tape (requires vhs, ttyd, ffmpeg)
 
 Output docs/demos/err-happy-path.gif
 Set Theme "Catppuccin Mocha"
@@ -9,100 +10,70 @@ Set Shell "zsh"
 Set Padding 16
 Set PlaybackSpeed 1
 
-# Bootstrap: cd, source helpers, ensure clean state (hidden from recording)
 Hide
-Type "cd /Users/jschelling/git/gh/NVIDIA/NVSentinel && source docs/demos/err-demo-helpers.sh"
+Type "cd /Users/jschelling/git/gh/NVIDIA/NVSentinel"
 Enter
-Sleep 2s
-Type "err_cleanup && sleep 6"
+Type "export PATH=/Users/jschelling/.local/share/mise/installs/kubectl/1.31.14/bin:/opt/homebrew/bin:$PATH"
+Enter
+Type "export KUBECONFIG=$HOME/.kube/config"
+Enter
+Type "kubectl config use-context kind-nvsentinel-dev"
+Enter
+Type "kubectl delete err err-kwok-node-5-a1b2c3d4 -n nvsentinel --ignore-not-found"
 Enter
 Sleep 8s
 Show
 Ctrl+L
 Sleep 500ms
 
-# ── 1. Baseline ──────────────────────────────────────────────────────────────
-Type "echo '── 1. Baseline: kwok-node-5 — no release taint, no managed label ──'"
+# 1. Baseline — no release taint, no managed label
+Type "kubectl get node kwok-node-5 -o yaml | grep -E 'external-remediation|managed: '"
 Enter
-Sleep 500ms
-Type "err_baseline"
-Enter
-Sleep 3s
+Sleep 5s
 
-# ── 2. Show manifest ─────────────────────────────────────────────────────────
-Type "echo '── 2. The ExternalRemediationRequest manifest ──'"
-Enter
-Sleep 500ms
+# 2. Show manifest
 Type "cat docs/demos/err-demo-node.yaml"
 Enter
-Sleep 3s
+Sleep 5s
 
-# ── 3. Apply ─────────────────────────────────────────────────────────────────
+# 3. Apply
 Sleep 5s
 Ctrl+L
-Type "echo '── 3. Apply ERR (fault-remediation does this automatically) ──'"
+Type "kubectl apply -f docs/demos/err-demo-node.yaml"
 Enter
-Sleep 500ms
-Type "err_apply"
+Sleep 6s
+
+# 4. Reconciler applied release taint + managed=false
+Ctrl+L
+Type "kubectl get node kwok-node-5 -o yaml | grep -E 'external-remediation|managed: '"
 Enter
 Sleep 5s
 
-# ── 4. Reconciler fires ───────────────────────────────────────────────────────
+# 5. ERR conditions
+Type "kubectl get err err-kwok-node-5-a1b2c3d4 -n nvsentinel -o yaml | grep -A2 'type:.*Remediation'"
+Enter
+Sleep 5s
+
+# 6. Janitor log
+Type "kubectl logs -n nvsentinel deploy/janitor --tail=30 | grep node-5 | grep -v WARN | tail -2 | jq -r .msg"
+Enter
+Sleep 5s
+
+# 7. External system patches Complete=True
 Sleep 5s
 Ctrl+L
-Type "echo '── 4. Janitor ERR reconciler: release taint + managed=false applied ──'"
+Type "kubectl patch err err-kwok-node-5-a1b2c3d4 -n nvsentinel --type merge --subresource status --patch-file docs/demos/complete-patch.json"
 Enter
-Sleep 500ms
-Type "err_node_state"
-Enter
-Sleep 3s
+Sleep 9s
 
-# ── 5. ERR conditions ────────────────────────────────────────────────────────
-Type "echo '── 5. ERR conditions: ownership released, awaiting external system ──'"
-Enter
-Sleep 500ms
-Type "err_conditions"
-Enter
-Sleep 3s
-
-# ── 6. Janitor logs ───────────────────────────────────────────────────────────
-Type "echo '── 6. Janitor apply-path log ──'"
-Enter
-Sleep 500ms
-Type "err_logs"
-Enter
-Sleep 3s
-
-# ── 7. External system signals completion ────────────────────────────────────
+# 8. Cleanup — taint and managed label removed
 Sleep 5s
 Ctrl+L
-Type "echo '── 7. External system patches ExternalRemediationComplete=True ──'"
+Type "kubectl get node kwok-node-5 -o yaml | grep -E 'external-remediation|managed: '"
 Enter
-Sleep 500ms
-Type "err_complete"
-Enter
-Sleep 8s
-
-# ── 8. Node restored ─────────────────────────────────────────────────────────
 Sleep 5s
-Ctrl+L
-Type "echo '── 8. Cleanup: release taint removed, managed label cleared ──'"
-Enter
-Sleep 500ms
-Type "err_node_state"
-Enter
-Sleep 3s
 
-# ── 9. ERR finalized ─────────────────────────────────────────────────────────
-Type "echo '── 9. ERR finalizer complete — object deleted ──'"
+# 9. ERR gone
+Type "kubectl get externalremediationrequests -n nvsentinel"
 Enter
-Sleep 500ms
-Type "err_list"
-Enter
-Sleep 4s
-
 Sleep 5s
-Ctrl+L
-Type "echo '✓ Node restored. ERR lifecycle complete.'"
-Enter
-Sleep 3s
