@@ -1,0 +1,13 @@
+apiVersion: nvsentinel.nvidia.com/v1
+kind: ExternalRemediationRequest
+metadata:
+  name: err-kwok-node-5-a1b2c3d4
+  namespace: nvsentinel
+  labels:
+    app.kubernetes.io/managed-by: nvsentinel
+spec:
+  healthEvent:
+    nodeName: "kwok-node-5"
+    id: "a1b2c3d4"
+    recommendedAction: CUSTOM
+    customRecommendedAction: "external-remediation"
