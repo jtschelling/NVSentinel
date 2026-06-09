@@ -14,7 +14,7 @@ Hide
 Type "cd /Users/jschelling/git/gh/NVIDIA/NVSentinel && source docs/demos/err-demo-helpers.sh"
 Enter
 Sleep 2s
-Type "kubectl delete err $ERR_NAME $NS --ignore-not-found && sleep 6"
+Type "err_cleanup && sleep 6"
 Enter
 Sleep 8s
 Show
@@ -38,6 +38,7 @@ Enter
 Sleep 3s
 
 # ── 3. Apply ─────────────────────────────────────────────────────────────────
+Sleep 5s
 Ctrl+L
 Type "echo '── 3. Apply ERR (fault-remediation does this automatically) ──'"
 Enter
@@ -47,6 +48,7 @@ Enter
 Sleep 5s
 
 # ── 4. Reconciler fires ───────────────────────────────────────────────────────
+Sleep 5s
 Ctrl+L
 Type "echo '── 4. Janitor ERR reconciler: release taint + managed=false applied ──'"
 Enter
@@ -72,6 +74,7 @@ Enter
 Sleep 3s
 
 # ── 7. External system signals completion ────────────────────────────────────
+Sleep 5s
 Ctrl+L
 Type "echo '── 7. External system patches ExternalRemediationComplete=True ──'"
 Enter
@@ -81,6 +84,7 @@ Enter
 Sleep 8s
 
 # ── 8. Node restored ─────────────────────────────────────────────────────────
+Sleep 5s
 Ctrl+L
 Type "echo '── 8. Cleanup: release taint removed, managed label cleared ──'"
 Enter
@@ -97,6 +101,7 @@ Type "err_list"
 Enter
 Sleep 4s
 
+Sleep 5s
 Ctrl+L
 Type "echo '✓ Node restored. ERR lifecycle complete.'"
 Enter
