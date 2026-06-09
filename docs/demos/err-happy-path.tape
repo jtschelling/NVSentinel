@@ -21,7 +21,7 @@ Type "kubectl config use-context kind-nvsentinel-dev"
 Enter
 Type "kubectl delete err err-kwok-node-5-a1b2c3d4 -n nvsentinel --ignore-not-found"
 Enter
-Sleep 8s
+Sleep 15s
 Show
 Ctrl+L
 
@@ -30,6 +30,9 @@ Type "echo '── 1. Baseline: kwok-node-5 has only the standard GPU taint ─�
 Enter
 Sleep 500ms
 Type "kubectl get node kwok-node-5 -o yaml | yq '.spec.taints'"
+Enter
+Sleep 4s
+Type "kubectl get pods -n nvsentinel --field-selector spec.nodeName=kwok-node-5"
 Enter
 Sleep 5s
 
@@ -64,20 +67,31 @@ Type "kubectl get node kwok-node-5 -o yaml | yq '.metadata.labels'"
 Enter
 Sleep 5s
 
-# 5. ERR conditions
+# 5. Health monitors evicted
 Sleep 5s
 Ctrl+L
-Type "echo '── 5. ERR conditions: NVSentinel released, awaiting external system ──'"
+Type "echo '── 5. release taint evicts health monitors from kwok-node-5 ──'"
+Enter
+Sleep 500ms
+Type "kubectl get pods -n nvsentinel --field-selector spec.nodeName=kwok-node-5"
+Enter
+Sleep 5s
+
+# 6. ERR conditions
+Sleep 5s
+Ctrl+L
+Type "echo '── 6. ERR conditions: NVSentinel released, awaiting external system ──'"
+
 Enter
 Sleep 500ms
 Type "kubectl get err err-kwok-node-5-a1b2c3d4 -n nvsentinel -o yaml | yq '.status.conditions'"
 Enter
 Sleep 5s
 
-# 6. Patch — show it first, then apply
+# 7. Patch — show it first, then apply
 Sleep 5s
 Ctrl+L
-Type "echo '── 6. external system signals Complete=True ──'"
+Type "echo '── 7. external system signals Complete=True ──'"
 Enter
 Sleep 500ms
 Type "cat docs/demos/complete-patch.json | yq"
@@ -87,10 +101,10 @@ Type "kubectl patch err err-kwok-node-5-a1b2c3d4 -n nvsentinel --type merge --su
 Enter
 Sleep 9s
 
-# 7. Node restored
+# 8. Node restored
 Sleep 5s
 Ctrl+L
-Type "echo '── 7. reconciler cleanup: taint removed, managed label cleared ──'"
+Type "echo '── 8. reconciler cleanup: taint removed, managed label cleared ──'"
 Enter
 Sleep 500ms
 Type "kubectl get node kwok-node-5 -o yaml | yq '.spec.taints'"
@@ -100,10 +114,13 @@ Type "kubectl get node kwok-node-5 -o yaml | yq '.metadata.labels'"
 Enter
 Sleep 5s
 
-# 8. ERR finalized
-Type "echo '── 8. ERR finalizer ran — object deleted ──'"
+# 9. ERR finalized
+Type "echo '── 9. ERR finalizer ran — object deleted, monitors rescheduled ──'"
 Enter
 Sleep 500ms
 Type "kubectl get externalremediationrequests -n nvsentinel"
+Enter
+Sleep 5s
+Type "kubectl get pods -n nvsentinel --field-selector spec.nodeName=kwok-node-5"
 Enter
 Sleep 5s
