@@ -68,9 +68,14 @@ generate: ## Generate CRDs and move them to Helm chart directory
 		find ./$(API_DIR) -name "*$${crd}*" -delete && \
 		echo "Removed config-only CRD: $${crd}"; \
 	done
-	@# Move remaining CRDs to Helm chart crds directory (clean first to remove stale files)
+	@# Move remaining CRDs to Helm chart crds directory. Clear only the files
+	@# controller-gen owns (its CRDs are all in the nvsentinel.nvidia.com group)
+	@# rather than the whole directory: maintenance_request.crd.yaml in here is
+	@# generated from proto by protoc-gen-crd in data-models (ADR-051), and a
+	@# blanket rm -rf would delete it on every run.
 	@echo "Moving generated CRDs to $(CRD_OUTPUT_DIR)..."
-	@rm -rf $(CRD_OUTPUT_DIR) && mkdir -p $(CRD_OUTPUT_DIR)
+	@mkdir -p $(CRD_OUTPUT_DIR)
+	@rm -f $(CRD_OUTPUT_DIR)/nvsentinel.nvidia.com_*.yaml
 	@mv ./$(API_DIR)/*.yaml $(CRD_OUTPUT_DIR)/
 	@echo "CRDs generated and moved successfully!"
 	@echo "Generated files:"
