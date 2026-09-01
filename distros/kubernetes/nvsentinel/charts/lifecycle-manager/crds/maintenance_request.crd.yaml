@@ -128,10 +128,10 @@ spec:
                       type: string
                     customRecommendedAction:
                       type: string
-                  description: healthEvent describes the preparation NVSentinel must perform for the incoming maintenance. The reconciler re-emits this event into the pipeline as authored — the requester's recommendedAction stands — so the normal quarantine -> drain -> remediation flow fires for whichever action the event names. Reuses the existing HealthEvent message by reference; adding a field to HealthEvent propagates here automatically.
+                  description: healthEvent describes the preparation NVSentinel must perform. The reconciler emits it as authored, so the recommendedAction it names selects the remediation.
                 startTime:
                   type: string
-                  description: startTime is when the maintenance window opens. It is recorded for observability and future scheduling; the node is prepared on creation today. The validating webhook requires this to be in the future on create, and on update only when it changes.
+                  description: startTime is when the maintenance window opens. Must be in the future on create, and on update whenever it changes.
                   format: RFC3339
             status:
               nullable: true
@@ -164,8 +164,8 @@ spec:
                         type: string
                         description: message is a human-readable message indicating details about the transition.
                     description: Condition is the wire equivalent of metav1.Condition. The janitor/pkg/condition adapter package converts between this proto representation and metav1.Condition at the controller boundary so existing controller-runtime helpers (meta.SetStatusCondition, meta.IsStatusConditionTrue) continue to work.
-                  description: conditions represent the latest available observations of the MR's current state. Reuses the Condition message declared in external_remediation.proto. See ADR-051 for the canonical type names and reasons.
-          description: MaintenanceRequest is the entry door into NVSentinel node preparation. An external system or operator — the requester — creates an MR to signal that maintenance is incoming for a node, and NVSentinel prepares the node (cordon, drain) before that maintenance begins. The MR persists until the requester deletes it, and deleting it emits the clearing health event. See ADR-051 (docs/designs/051-maintenance-request.md) for the full design, including the deletion-as-clear model, the admission checks, and the pipeline dependencies.
+                  description: 'conditions are the latest observations of the request''s state. There is no completionTime: an MR is deleted to clear its fault, not retained.'
+          description: MaintenanceRequest signals that maintenance is incoming for a node, so NVSentinel prepares it (cordon, drain) beforehand. It persists until the requester deletes it, and deleting it clears the fault. See ADR-051.
       additionalPrinterColumns:
         - name: Node
           type: string

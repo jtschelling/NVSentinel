@@ -50,9 +50,7 @@ func newMaintenanceRequest(startTime time.Time) *v1.MaintenanceRequest {
 	}
 }
 
-// Timestamps must serialise as RFC3339 strings, which is what the
-// protoc-gen-crd schema declares. encoding/json's reflection default would emit
-// {"seconds":N,"nanos":M} and the API server would reject the object with 422.
+// The API server rejects the {"seconds":N,"nanos":M} form with 422.
 func TestMarshalJSONEmitsRFC3339Timestamps(t *testing.T) {
 	startTime := time.Date(2026, 5, 13, 3, 0, 0, 0, time.UTC)
 
@@ -81,8 +79,7 @@ func TestJSONRoundTripPreservesSpec(t *testing.T) {
 	assert.Equal(t, "external-remediation", decoded.Spec.GetHealthEvent().GetCustomRecommendedAction())
 }
 
-// An absent or explicitly null spec/status must decode to a nil pointer rather
-// than an empty message, so callers can distinguish "unset" from "set to zero".
+// Callers must be able to tell "unset" from "set to zero".
 func TestUnmarshalJSONTreatsNullAsAbsent(t *testing.T) {
 	for name, payload := range map[string]string{
 		"omitted": `{"metadata":{"name":"mr-0"}}`,
@@ -112,9 +109,7 @@ func TestListJSONRoundTrip(t *testing.T) {
 	assert.Equal(t, "node-0", decoded.Items[0].Spec.GetHealthEvent().GetNodeName())
 }
 
-// MaintenanceRequest registers into nvsentinel.dgxc.nvidia.com/v1, which is a
-// different group from the nvsentinel.nvidia.com/v1alpha1 group ValidationRequest
-// uses. Both must be able to share one scheme.
+// The two API groups must share one scheme.
 func TestSchemeRegistration(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, v1.AddToScheme(scheme))
@@ -133,8 +128,7 @@ func TestSchemeRegistration(t *testing.T) {
 	assert.Equal(t, "MaintenanceRequestList", listGVKs[0].Kind)
 }
 
-// DeepCopy must clone the proto messages, not alias them; controller-runtime
-// hands cached objects to reconcilers and relies on this.
+// controller-runtime hands cached objects to reconcilers, so this must not alias.
 func TestDeepCopyIsDeep(t *testing.T) {
 	original := newMaintenanceRequest(time.Now().UTC())
 

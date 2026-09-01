@@ -17,56 +17,32 @@ package datamodels;
 
 import "google/protobuf/timestamp.proto";
 import "health_event.proto";
-// external_remediation.proto is imported for the shared Condition message, which
-// MaintenanceRequestStatus reuses rather than redeclaring. protoc-gen-crd emits a
-// CRD for every transitively-imported proto carrying a k8s_crd option, so the
-// Makefile rule removes the strays this import produces.
+// Imported for the shared Condition message. protoc-gen-crd also emits CRDs for
+// transitive imports, so the Makefile rule deletes the strays.
 import "external_remediation.proto";
 import "github.com/yandex/protoc-gen-crd/library/go/k8s/protoc_gen_crd/proto/crd.proto";
 
 option go_package = "github.com/nvidia/nvsentinel/data-models/pkg/protos";
 
-// MaintenanceRequestSpec is the desired state of an MR. The requester supplies
-// the HealthEvent describing the preparation NVSentinel must perform, and the
-// time at which the maintenance window opens. The wrapper struct leaves room for
-// future MR-specific spec fields without requiring changes to the HealthEvent
-// proto.
 message MaintenanceRequestSpec {
-  // healthEvent describes the preparation NVSentinel must perform for the
-  // incoming maintenance. The reconciler re-emits this event into the pipeline
-  // as authored — the requester's recommendedAction stands — so the normal
-  // quarantine -> drain -> remediation flow fires for whichever action the
-  // event names. Reuses the existing HealthEvent message by reference; adding a
-  // field to HealthEvent propagates here automatically.
+  // healthEvent describes the preparation NVSentinel must perform. The reconciler
+  // emits it as authored, so the recommendedAction it names selects the remediation.
   HealthEvent healthEvent = 1;
 
-  // startTime is when the maintenance window opens. It is recorded for
-  // observability and future scheduling; the node is prepared on creation
-  // today. The validating webhook requires this to be in the future on create,
-  // and on update only when it changes.
+  // startTime is when the maintenance window opens. Must be in the future on
+  // create, and on update whenever it changes.
   google.protobuf.Timestamp startTime = 2;
 }
 
-// MaintenanceRequestStatus is the observed state of an MR. There is
-// deliberately no completionTime: the MR is deleted to clear the fault it
-// raised, not retained after completion, so there is no terminal state to stamp
-// on a living object. See ADR-051 for the condition state machine.
 message MaintenanceRequestStatus {
-  // conditions represent the latest available observations of the MR's current
-  // state. Reuses the Condition message declared in external_remediation.proto.
-  // See ADR-051 for the canonical type names and reasons.
+  // conditions are the latest observations of the request's state. There is no
+  // completionTime: an MR is deleted to clear its fault, not retained.
   repeated Condition conditions = 1;
 }
 
-// MaintenanceRequest is the entry door into NVSentinel node preparation. An
-// external system or operator — the requester — creates an MR to signal that
-// maintenance is incoming for a node, and NVSentinel prepares the node (cordon,
-// drain) before that maintenance begins. The MR persists until the requester
-// deletes it, and deleting it emits the clearing health event.
-//
-// See ADR-051 (docs/designs/051-maintenance-request.md) for the full design,
-// including the deletion-as-clear model, the admission checks, and the pipeline
-// dependencies.
+// MaintenanceRequest signals that maintenance is incoming for a node, so
+// NVSentinel prepares it (cordon, drain) beforehand. It persists until the
+// requester deletes it, and deleting it clears the fault. See ADR-051.
 message MaintenanceRequest {
   option (protoc_gen_crd.k8s_crd) = {
     api_group: "nvsentinel.dgxc.nvidia.com",
@@ -75,9 +51,7 @@ message MaintenanceRequest {
     singular: "maintenancerequest",
     short_names: ["mr"],
     categories: ["nvsentinel"],
-    // Cluster-scoped to match ExtRR and the other node-level CRDs — an MR
-    // represents a node-level maintenance claim and operators interact with it
-    // by node name, not by namespace.
+    // Cluster-scoped, like the other node-level CRDs.
     scope: ST_CLUSTER,
     additional_columns: [
       {name: "Node",      type: CT_STRING, json_path: ".spec.healthEvent.nodeName"},

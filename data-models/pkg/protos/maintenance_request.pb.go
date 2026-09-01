@@ -37,24 +37,13 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// MaintenanceRequestSpec is the desired state of an MR. The requester supplies
-// the HealthEvent describing the preparation NVSentinel must perform, and the
-// time at which the maintenance window opens. The wrapper struct leaves room for
-// future MR-specific spec fields without requiring changes to the HealthEvent
-// proto.
 type MaintenanceRequestSpec struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// healthEvent describes the preparation NVSentinel must perform for the
-	// incoming maintenance. The reconciler re-emits this event into the pipeline
-	// as authored — the requester's recommendedAction stands — so the normal
-	// quarantine -> drain -> remediation flow fires for whichever action the
-	// event names. Reuses the existing HealthEvent message by reference; adding a
-	// field to HealthEvent propagates here automatically.
+	// healthEvent describes the preparation NVSentinel must perform. The reconciler
+	// emits it as authored, so the recommendedAction it names selects the remediation.
 	HealthEvent *HealthEvent `protobuf:"bytes,1,opt,name=healthEvent,proto3" json:"healthEvent,omitempty"`
-	// startTime is when the maintenance window opens. It is recorded for
-	// observability and future scheduling; the node is prepared on creation
-	// today. The validating webhook requires this to be in the future on create,
-	// and on update only when it changes.
+	// startTime is when the maintenance window opens. Must be in the future on
+	// create, and on update whenever it changes.
 	StartTime     *timestamppb.Timestamp `protobuf:"bytes,2,opt,name=startTime,proto3" json:"startTime,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -104,15 +93,10 @@ func (x *MaintenanceRequestSpec) GetStartTime() *timestamppb.Timestamp {
 	return nil
 }
 
-// MaintenanceRequestStatus is the observed state of an MR. There is
-// deliberately no completionTime: the MR is deleted to clear the fault it
-// raised, not retained after completion, so there is no terminal state to stamp
-// on a living object. See ADR-051 for the condition state machine.
 type MaintenanceRequestStatus struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// conditions represent the latest available observations of the MR's current
-	// state. Reuses the Condition message declared in external_remediation.proto.
-	// See ADR-051 for the canonical type names and reasons.
+	// conditions are the latest observations of the request's state. There is no
+	// completionTime: an MR is deleted to clear its fault, not retained.
 	Conditions    []*Condition `protobuf:"bytes,1,rep,name=conditions,proto3" json:"conditions,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -155,15 +139,9 @@ func (x *MaintenanceRequestStatus) GetConditions() []*Condition {
 	return nil
 }
 
-// MaintenanceRequest is the entry door into NVSentinel node preparation. An
-// external system or operator — the requester — creates an MR to signal that
-// maintenance is incoming for a node, and NVSentinel prepares the node (cordon,
-// drain) before that maintenance begins. The MR persists until the requester
-// deletes it, and deleting it emits the clearing health event.
-//
-// See ADR-051 (docs/designs/051-maintenance-request.md) for the full design,
-// including the deletion-as-clear model, the admission checks, and the pipeline
-// dependencies.
+// MaintenanceRequest signals that maintenance is incoming for a node, so
+// NVSentinel prepares it (cordon, drain) beforehand. It persists until the
+// requester deletes it, and deleting it clears the fault. See ADR-051.
 type MaintenanceRequest struct {
 	state         protoimpl.MessageState    `protogen:"open.v1"`
 	Spec          *MaintenanceRequestSpec   `protobuf:"bytes,1,opt,name=spec,proto3" json:"spec,omitempty"`
